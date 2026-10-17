@@ -20,6 +20,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 No ambiente de desenvolvimento deste repositório, os comandos também funcionam com `--offline` antes de `--`.
 
+## Instalador e atualizações para Windows
+
+O instalador é um executável Rust separado. O arquivo em `dist/JetSheets-Installer-windows-x86_64.exe` já inclui a versão atual do aplicativo para instalação sem download. Depois da primeira Release, baixe [JetSheets-Installer-windows-x86_64.exe](https://github.com/Joaopedror21/JetSheets/releases/latest/download/JetSheets-Installer-windows-x86_64.exe). Ele consulta a última versão estável, mostra as notas da publicação, permite escolher a pasta e instala `JetSheets.exe` nela.
+
+Durante o download, **Pausar** fecha a conexão e **Continuar** retoma pelo trecho restante; **Cancelar** remove o arquivo parcial. Antes de substituir o aplicativo, o instalador confere o tamanho e o SHA-256 informados pelo GitHub. Se a atualização falhar ou for interrompida, tenta recuperar a versão anterior. Feche o JetSheets antes de atualizar. Projetos `.jetsheet` não são removidos.
+
+Para compilar um instalador que inclua o aplicativo localmente:
+
+```powershell
+cargo build --release --locked -p jetsheets-ui
+$env:JETSHEETS_BUNDLE_PATH = (Resolve-Path target/release/jetsheets-ui.exe).Path
+cargo build --release --locked -p jetsheets-installer
+Remove-Item Env:JETSHEETS_BUNDLE_PATH
+```
+
+O arquivo fica em `target/release/jetsheets-installer.exe`. O instalador grava o executável na pasta escolhida; não cria atalho nem entrada de desinstalação no Windows. A primeira Release precisa ser publicada antes que a consulta de atualizações encontre algo; a instalação da versão incluída já funciona sem ela. O procedimento de publicação e as decisões de segurança estão em [docs/INSTALLER.md](docs/INSTALLER.md).
+
 ## Fluxo rápido
 
 1. Use **+ Linha** para começar uma tabela vazia ou **Importar CSV** para abrir um arquivo UTF-8 com cabeçalhos. O arquivo [estoque_exemplo.csv](examples/estoque_exemplo.csv) contém dados sintéticos para experimentar.

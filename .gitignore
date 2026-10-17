@@ -1,4 +1,5 @@
 /target/
+/dist/
 *.jetsheet.tmp
 *.jetsheet.bak
 *.exe

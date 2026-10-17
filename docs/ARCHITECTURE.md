@@ -20,6 +20,8 @@ jetsheets-ui (eframe/egui)
 
 O projeto contém uma tabela, o filtro confirmado e a configuração do gráfico. A interface mantém separadamente o comando em digitação, a prévia e o histórico de filtros para desfazer/refazer. Editar uma célula preserva o índice da linha na tabela de origem; resultados e gráfico são recalculados a partir do estado atual. Salvar grava somente dados e visualizações confirmados.
 
+O instalador/atualizador é um crate Rust separado para Windows. Ele não altera o formato `.jetsheet`. O fluxo de download, verificação e recuperação é descrito em [INSTALLER.md](INSTALLER.md).
+
 ## Limite da Fase 1
 
 O interpretador executa filtros e comparações de valores; agrupamentos, agregações em linguagem natural, XLSX, fórmulas, dashboards e outros tipos de gráficos pertencem a fases posteriores. O arquivo `.jetsheet` usa JSON estruturado e versionado nesta primeira fase. Compactação e recursos avançados de recuperação ficam para uma evolução do formato.

@@ -875,6 +875,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jetsheets-installer"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "rfd",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "jetsheets-language"
 version = "0.1.0"
 dependencies = [
