@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-pub const REPOSITORY: &str = "Joaopedror21/JetSheets";
+pub const REPOSITORY: &str = "Joaopedror21/jetsheets";
 pub const ASSET_NAME: &str = "JetSheets-windows-x86_64.exe";
 pub const EXECUTABLE_NAME: &str = "JetSheets.exe";
 pub const RECORD_NAME: &str = "jetsheets-install.json";

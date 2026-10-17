@@ -2,7 +2,7 @@
 
 ## Fluxo
 
-`jetsheets-installer` é uma interface desktop Rust/egui para Windows. A origem fixa é `Joaopedror21/JetSheets`. Ao iniciar, busca a última Release estável na API do GitHub, apresenta a tag e as notas e compara a versão com `jetsheets-install.json` da pasta selecionada.
+`jetsheets-installer` é uma interface desktop Rust/egui para Windows. A origem fixa é `Joaopedror21/jetsheets`. Ao iniciar, busca a última Release estável na API do GitHub, apresenta a tag e as notas e compara a versão com `jetsheets-install.json` da pasta selecionada.
 
 Esse fluxo sem login exige que o repositório e suas Releases sejam públicos. O repositório está público; ainda não há uma Release, então a consulta retorna 404 até a primeira publicação. O instalador distribuído também contém a versão atual do aplicativo e permite instalá-la sem download. Para um repositório privado seria necessário outro fluxo de autenticação antes de oferecer downloads.
 
@@ -23,7 +23,7 @@ git push origin v0.1.0
 
 Para cada versão posterior, altere `version` nos dois `Cargo.toml`, atualize `Cargo.lock`, envie o código e crie uma nova tag correspondente. Não reutilize uma tag ou substitua um ativo publicado. A publicação exige que o repositório permita ao `GITHUB_TOKEN` criar Releases; o workflow pede somente `contents: write` no job de publicação.
 
-Link direto após a primeira publicação: `https://github.com/Joaopedror21/JetSheets/releases/latest/download/JetSheets-Installer-windows-x86_64.exe`.
+Link direto após a primeira publicação: `https://github.com/Joaopedror21/jetsheets/releases/latest/download/JetSheets-Installer-windows-x86_64.exe`.
 
 ## Limites de segurança
 

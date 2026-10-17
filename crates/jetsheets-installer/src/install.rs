@@ -32,7 +32,7 @@ impl InstallRecord {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.repository != REPOSITORY {
+        if !self.repository.eq_ignore_ascii_case(REPOSITORY) {
             return Err("Esta pasta pertence a outra instalação.".into());
         }
         Version::parse(&self.version)?;

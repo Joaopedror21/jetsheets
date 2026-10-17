@@ -22,7 +22,7 @@ No ambiente de desenvolvimento deste repositório, os comandos também funcionam
 
 ## Instalador e atualizações para Windows
 
-O instalador é um executável Rust separado. O arquivo em `dist/JetSheets-Installer-windows-x86_64.exe` já inclui a versão atual do aplicativo para instalação sem download. Depois da primeira Release, baixe [JetSheets-Installer-windows-x86_64.exe](https://github.com/Joaopedror21/JetSheets/releases/latest/download/JetSheets-Installer-windows-x86_64.exe). Ele consulta a última versão estável, mostra as notas da publicação, permite escolher a pasta e instala `JetSheets.exe` nela.
+O instalador é um executável Rust separado. O arquivo em `dist/JetSheets-Installer-windows-x86_64.exe` já inclui a versão atual do aplicativo para instalação sem download. Depois da primeira Release, baixe [JetSheets-Installer-windows-x86_64.exe](https://github.com/Joaopedror21/jetsheets/releases/latest/download/JetSheets-Installer-windows-x86_64.exe). Ele consulta a última versão estável, mostra as notas da publicação, permite escolher a pasta e instala `JetSheets.exe` nela.
 
 Durante o download, **Pausar** fecha a conexão e **Continuar** retoma pelo trecho restante; **Cancelar** remove o arquivo parcial. Antes de substituir o aplicativo, o instalador confere o tamanho e o SHA-256 informados pelo GitHub. Se a atualização falhar ou for interrompida, tenta recuperar a versão anterior. Feche o JetSheets antes de atualizar. Projetos `.jetsheet` não são removidos.
 
