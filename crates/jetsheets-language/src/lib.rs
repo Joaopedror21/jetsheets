@@ -2,7 +2,8 @@
 //! expression; the data engine owns execution and result statistics.
 
 use jetsheets_core::{
-    ColumnKind, Condition, FilterExpr, FilterValue, Operator, Table, parse_br_number,
+    ColumnKind, Condition, FilterExpr, FilterValue, Operator, SortDirection, SortSpec, Table,
+    parse_br_number,
 };
 use std::fmt;
 
@@ -11,6 +12,148 @@ use std::fmt;
 pub struct ParsedFilter {
     pub expr: FilterExpr,
     pub explanation: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedSort {
+    pub spec: SortSpec,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ParsedCommand {
+    Filter(ParsedFilter),
+    Sort(ParsedSort),
+}
+
+impl ParsedCommand {
+    pub fn explanation(&self) -> &str {
+        match self {
+            Self::Filter(parsed) => &parsed.explanation,
+            Self::Sort(parsed) => &parsed.explanation,
+        }
+    }
+}
+
+pub fn parse_command(command: &str, table: &Table) -> Result<ParsedCommand, ParseError> {
+    parse_command_with_override(command, table, None)
+}
+
+pub fn parse_command_with_override(
+    command: &str,
+    table: &Table,
+    chosen_column: Option<usize>,
+) -> Result<ParsedCommand, ParseError> {
+    let tokens = tokenize(command);
+    if tokens
+        .first()
+        .is_some_and(|token| is_sort_intent(&token.norm))
+    {
+        parse_sort(&tokens, table, chosen_column).map(ParsedCommand::Sort)
+    } else {
+        parse_filter_with_override(command, table, chosen_column).map(ParsedCommand::Filter)
+    }
+}
+
+fn is_sort_intent(word: &str) -> bool {
+    matches!(
+        word,
+        "ordene" | "ordenar" | "ordena" | "organize" | "classifique"
+    )
+}
+
+fn parse_sort(
+    tokens: &[Token],
+    table: &Table,
+    chosen_column: Option<usize>,
+) -> Result<ParsedSort, ParseError> {
+    let explicit_ascending = tokens
+        .iter()
+        .any(|token| matches!(token.norm.as_str(), "crescente" | "ascendente"));
+    let explicit_descending = tokens
+        .iter()
+        .any(|token| matches!(token.norm.as_str(), "decrescente" | "descendente"));
+    let greater = tokens.iter().position(|token| token.norm == "maior");
+    let lesser = tokens.iter().position(|token| token.norm == "menor");
+    let word_direction = match (greater, lesser) {
+        (Some(greater), Some(lesser)) if greater < lesser => Some(SortDirection::Descending),
+        (Some(_), Some(_)) => Some(SortDirection::Ascending),
+        (Some(_), None) => Some(SortDirection::Descending),
+        (None, Some(_)) => Some(SortDirection::Ascending),
+        (None, None) => None,
+    };
+    if explicit_ascending && explicit_descending
+        || explicit_ascending && word_direction == Some(SortDirection::Descending)
+        || explicit_descending && word_direction == Some(SortDirection::Ascending)
+    {
+        return Err(ParseError::InvalidValue(
+            "a direção da ordenação é contraditória".into(),
+        ));
+    }
+    let direction = if explicit_descending {
+        SortDirection::Descending
+    } else if explicit_ascending {
+        SortDirection::Ascending
+    } else {
+        word_direction.unwrap_or(SortDirection::Ascending)
+    };
+
+    let prefix = if let Some(by) = tokens.iter().position(|token| token.norm == "por") {
+        let after_by = &tokens[by + 1..];
+        let end = after_by
+            .iter()
+            .position(|token| is_sort_direction_word(&token.norm))
+            .unwrap_or(after_by.len());
+        if after_by[end..].iter().any(|token| {
+            !is_sort_direction_word(&token.norm)
+                && !matches!(token.norm.as_str(), "do" | "da" | "de" | "para" | "o" | "a")
+        }) {
+            return Err(ParseError::Unsupported(
+                "há palavras não reconhecidas após a direção da ordenação".into(),
+            ));
+        }
+        &after_by[..end]
+    } else if let Some(direction_at) = tokens
+        .iter()
+        .position(|token| is_sort_direction_word(&token.norm))
+    {
+        if tokens[direction_at + 1..].iter().any(|token| {
+            !is_filler(&token.norm)
+                && !is_sort_direction_word(&token.norm)
+                && !matches!(token.norm.as_str(), "para" | "do" | "da")
+        }) {
+            tokens
+        } else {
+            &tokens[1..direction_at]
+        }
+    } else {
+        &tokens[1..]
+    };
+    if prefix.is_empty() {
+        return Err(ParseError::Unsupported(
+            "informe a coluna para ordenar (ex.: 'ordene por Valor decrescente')".into(),
+        ));
+    }
+    let column = resolve_column(prefix, table, chosen_column)?;
+    let spec = SortSpec { column, direction };
+    let order = match direction {
+        SortDirection::Ascending => "crescente",
+        SortDirection::Descending => "decrescente",
+    };
+    Ok(ParsedSort {
+        spec,
+        explanation: format!(
+            "Ordenar pela coluna '{}' em ordem {order}.",
+            table.columns[column].name
+        ),
+    })
+}
+
+fn is_sort_direction_word(word: &str) -> bool {
+    matches!(
+        word,
+        "maior" | "menor" | "crescente" | "decrescente" | "ascendente" | "descendente"
+    )
 }
 
 /// User-facing failure modes. An ambiguous column is never selected silently.
@@ -28,7 +171,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unsupported(detail) => write!(f, "Comando não suportado na Fase 1: {detail}"),
+            Self::Unsupported(detail) => write!(f, "Comando não suportado nesta versão: {detail}"),
             Self::Ambiguous { term, candidates } => write!(
                 f,
                 "A coluna '{term}' é ambígua. Escolha: {}.",
@@ -640,7 +783,7 @@ fn format_number(number: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jetsheets_core::evaluate_filter;
+    use jetsheets_core::{evaluate_filter, sort_rows};
 
     fn products() -> Table {
         let mut table = Table::new(
@@ -677,6 +820,52 @@ mod tests {
             parsed.explanation,
             "Valor maior que 5000 E Quantidade maior que 4000"
         );
+    }
+
+    #[test]
+    fn understands_portuguese_sort_and_requires_unambiguous_column() {
+        let table = products();
+        for command in [
+            "Ordene do maior para o menor valor",
+            "Ordene por valor decrescente",
+        ] {
+            let ParsedCommand::Sort(parsed) = parse_command(command, &table).unwrap() else {
+                panic!("esperada ordenação");
+            };
+            assert_eq!(parsed.spec.column, 1);
+            assert_eq!(parsed.spec.direction, SortDirection::Descending);
+            assert_eq!(
+                sort_rows(&table, &[0, 1, 2, 3], &parsed.spec).unwrap(),
+                vec![2, 0, 1, 3]
+            );
+        }
+        let ParsedCommand::Sort(parsed) =
+            parse_command("Ordene por valor crescente", &table).unwrap()
+        else {
+            panic!("esperada ordenação");
+        };
+        assert_eq!(parsed.spec.direction, SortDirection::Ascending);
+        assert!(parse_command("Ordene por valor crescente decrescente", &table).is_err());
+        assert!(parse_command("Ordene por valor crescente e apague os dados", &table).is_err());
+
+        let mut ambiguous = Table::new(
+            "Teste",
+            vec!["Valor de compra".into(), "Valor de venda".into()],
+        );
+        ambiguous.add_row(vec!["1".into(), "2".into()]).unwrap();
+        ambiguous.infer_column_types();
+        assert!(matches!(
+            parse_command("Ordene por valor", &ambiguous),
+            Err(ParseError::Ambiguous { .. })
+        ));
+        let parsed = parse_command_with_override("Ordene por valor", &ambiguous, Some(1)).unwrap();
+        assert!(matches!(
+            parsed,
+            ParsedCommand::Sort(ParsedSort {
+                spec: SortSpec { column: 1, .. },
+                ..
+            })
+        ));
     }
 
     #[test]

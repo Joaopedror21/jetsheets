@@ -16,11 +16,11 @@ O estado da instalação aparece no topo da janela para a pasta selecionada. **D
 
 O workflow `.github/workflows/release.yml` roda em Windows quando uma tag `vMAJOR.MINOR.PATCH` é enviada. Ele verifica que a tag corresponde às versões de `jetsheets-ui` e `jetsheets-installer`, executa format/check/test/clippy, compila primeiro o aplicativo e depois o inclui no instalador, confere o subsistema gráfico de ambos e publica `JetSheets-windows-x86_64.exe`, `JetSheets-Installer-windows-x86_64.exe` e `JetSheets-Setup.exe`. Os dois últimos são cópias do mesmo instalador Rust. O instalador lê as Releases; artefatos temporários de runs do Actions não são usados como feed de atualização.
 
-Para publicar a versão `v0.1.4` após revisar e enviar o código para o repositório:
+Para publicar a versão `v0.1.5` após revisar e enviar o código para o repositório:
 
 ```powershell
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 Para cada versão posterior, altere `version` nos dois `Cargo.toml`, atualize `Cargo.lock`, envie o código e crie uma nova tag correspondente. Não reutilize uma tag ou substitua um ativo publicado. A publicação exige que o repositório permita ao `GITHUB_TOKEN` criar Releases; o workflow pede somente `contents: write` no job de publicação.

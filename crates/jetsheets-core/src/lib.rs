@@ -4,6 +4,7 @@
 //! indices, so applying or undoing a filter never removes source data.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 /// A named table with a rectangular set of rows.
@@ -168,7 +169,7 @@ impl Table {
                 .collect();
             let kind = if values.is_empty() {
                 ColumnKind::Text
-            } else if values.iter().all(|value| is_date(value)) {
+            } else if values.iter().all(|value| parse_date(value).is_some()) {
                 ColumnKind::Date
             } else if values.iter().all(|value| parse_br_number(value).is_some()) {
                 if values.iter().all(|value| value.ends_with('%')) {
@@ -195,39 +196,33 @@ fn looks_like_currency(name: &str) -> bool {
         .any(|word| lower.contains(word))
 }
 
-fn is_date(value: &str) -> bool {
+fn parse_date(value: &str) -> Option<(u32, u32, u32)> {
     let parts: Vec<&str> = if value.contains('/') {
         value.split('/').collect()
     } else if value.contains('-') {
         value.split('-').collect()
     } else {
-        return false;
+        return None;
     };
     if parts.len() != 3
         || !parts
             .iter()
             .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
     {
-        return false;
+        return None;
     }
     let (year, month, day) = if parts[0].len() == 4 {
         (parts[0], parts[1], parts[2])
     } else if parts[2].len() == 4 {
         (parts[2], parts[1], parts[0])
     } else {
-        return false;
+        return None;
     };
-    let Some(year) = year.parse::<u32>().ok() else {
-        return false;
-    };
-    let Some(month) = month.parse::<u32>().ok() else {
-        return false;
-    };
-    let Some(day) = day.parse::<u32>().ok() else {
-        return false;
-    };
+    let year = year.parse::<u32>().ok()?;
+    let month = month.parse::<u32>().ok()?;
+    let day = day.parse::<u32>().ok()?;
     if year == 0 || !(1..=12).contains(&month) {
-        return false;
+        return None;
     }
     let days = match month {
         4 | 6 | 9 | 11 => 30,
@@ -235,7 +230,86 @@ fn is_date(value: &str) -> bool {
         2 => 28,
         _ => 31,
     };
-    (1..=days).contains(&day)
+    (1..=days).contains(&day).then_some((year, month, day))
+}
+
+/// Sorts visible source row indices without changing the table itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortSpec {
+    pub column: usize,
+    pub direction: SortDirection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+pub fn sort_rows(
+    table: &Table,
+    row_indices: &[usize],
+    spec: &SortSpec,
+) -> Result<Vec<usize>, String> {
+    let column = table
+        .columns
+        .get(spec.column)
+        .ok_or_else(|| format!("Coluna {} inexistente na ordenação.", spec.column))?;
+    if let Some(&row) = row_indices.iter().find(|&&row| row >= table.row_count()) {
+        return Err(format!("Linha {row} inexistente na ordenação."));
+    }
+    if let Some(&row) = row_indices
+        .iter()
+        .find(|&&row| table.rows[row].get(spec.column).is_none())
+    {
+        return Err(format!("Linha {row} incompleta na ordenação."));
+    }
+    let mut sorted = row_indices.to_vec();
+    sorted.sort_by(|&left, &right| {
+        let left_value = table.rows[left][spec.column].trim();
+        let right_value = table.rows[right][spec.column].trim();
+        match column.kind {
+            ColumnKind::Number | ColumnKind::Currency | ColumnKind::Percentage => compare_optional(
+                parse_br_number(left_value),
+                parse_br_number(right_value),
+                spec.direction,
+                f64::total_cmp,
+            ),
+            ColumnKind::Date => compare_optional(
+                parse_date(left_value),
+                parse_date(right_value),
+                spec.direction,
+                Ord::cmp,
+            ),
+            ColumnKind::Text => compare_optional(
+                (!left_value.is_empty()).then(|| fold_text(left_value)),
+                (!right_value.is_empty()).then(|| fold_text(right_value)),
+                spec.direction,
+                Ord::cmp,
+            ),
+        }
+    });
+    Ok(sorted)
+}
+
+fn compare_optional<T>(
+    left: Option<T>,
+    right: Option<T>,
+    direction: SortDirection,
+    compare: impl FnOnce(&T, &T) -> Ordering,
+) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let ordering = compare(&left, &right);
+            match direction {
+                SortDirection::Ascending => ordering,
+                SortDirection::Descending => ordering.reverse(),
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
 }
 
 /// Parses a finite Brazilian number, including `R$`, grouping dots, decimal
@@ -714,5 +788,58 @@ mod tests {
         assert_eq!(table.rows[0], vec!["17/10/2026"]);
         table.remove_row(0).unwrap();
         assert!(table.rows.is_empty());
+    }
+
+    #[test]
+    fn sorts_numbers_and_dates_stably_with_missing_values_last() {
+        let mut table = Table::new("Estoque", vec!["Valor".into(), "Data".into()]);
+        for row in [
+            ["R$ 20,50", "20/01/2026"],
+            ["R$ 3,00", "02/02/2025"],
+            ["R$ 20,50", "01/03/2026"],
+            ["", ""],
+        ] {
+            table.add_row(row.map(str::to_owned).to_vec()).unwrap();
+        }
+        table.infer_column_types();
+        let source = vec![0, 1, 2, 3];
+        assert_eq!(table.columns[0].kind, ColumnKind::Currency);
+        assert_eq!(table.columns[1].kind, ColumnKind::Date);
+        assert_eq!(
+            sort_rows(
+                &table,
+                &source,
+                &SortSpec {
+                    column: 0,
+                    direction: SortDirection::Descending
+                }
+            )
+            .unwrap(),
+            vec![0, 2, 1, 3]
+        );
+        assert_eq!(
+            sort_rows(
+                &table,
+                &source,
+                &SortSpec {
+                    column: 1,
+                    direction: SortDirection::Ascending
+                }
+            )
+            .unwrap(),
+            vec![1, 0, 2, 3]
+        );
+        assert_eq!(source, vec![0, 1, 2, 3]);
+        assert!(
+            sort_rows(
+                &table,
+                &source,
+                &SortSpec {
+                    column: 9,
+                    direction: SortDirection::Ascending
+                }
+            )
+            .is_err()
+        );
     }
 }

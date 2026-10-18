@@ -18,7 +18,11 @@ jetsheets-ui (eframe/egui)
 
 ## Estado e fluxo
 
-O projeto contém uma tabela, o filtro confirmado e a configuração do gráfico. A interface mantém separadamente o comando em digitação, a prévia e o histórico de filtros para desfazer/refazer. Editar uma célula preserva o índice da linha na tabela de origem; resultados e gráfico são recalculados a partir do estado atual. Salvar grava somente dados e visualizações confirmados.
+O projeto contém uma tabela, o filtro confirmado, a ordenação e a configuração do gráfico. A interface mantém separadamente o comando em digitação, a prévia e o histórico de visualização para desfazer/refazer filtro ou ordenação. Editar uma célula preserva o índice da linha na tabela de origem; resultados e gráfico são recalculados a partir do estado atual. Salvar grava somente dados e visualizações confirmados.
+
+## Evolução da Fase 2
+
+A ordenação por coluna é aplicada sobre os índices das linhas visíveis, sem reorganizar os dados de origem. Números brasileiros e datas são comparados pelos seus valores, texto ignora diferenças de maiúsculas e acentos e células vazias ficam no fim em ambas as direções. O comando em português e o seletor de resultados usam a mesma operação. O campo opcional `sort` no projeto mantém compatibilidade de leitura com arquivos `.jetsheet` anteriores.
 
 O instalador/atualizador é um crate Rust separado para Windows. Ele não altera o formato `.jetsheet`. O fluxo de download, verificação e recuperação é descrito em [INSTALLER.md](INSTALLER.md).
 

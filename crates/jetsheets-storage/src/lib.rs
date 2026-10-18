@@ -1,7 +1,7 @@
 //! Local CSV import and versioned JetSheets project files.
 
 use jetsheets_charts::ChartSpec;
-use jetsheets_core::{FilterExpr, Table, evaluate_filter};
+use jetsheets_core::{FilterExpr, SortSpec, Table, evaluate_filter, sort_rows};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -17,6 +17,8 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct Project {
     pub table: Table,
     pub filter: Option<FilterExpr>,
+    #[serde(default)]
+    pub sort: Option<SortSpec>,
     pub chart: Option<ChartSpec>,
 }
 
@@ -250,6 +252,10 @@ fn validate_project(project: &Project) -> Result<(), StorageError> {
     if let Some(filter) = &project.filter {
         evaluate_filter(&project.table, filter)
             .map_err(|error| StorageError::Project(format!("Filtro salvo inválido: {error}")))?;
+    }
+    if let Some(sort) = &project.sort {
+        sort_rows(&project.table, &[], sort)
+            .map_err(|error| StorageError::Project(format!("Ordenação salva inválida: {error}")))?;
     }
     if let Some(spec) = &project.chart {
         spec.validate(&project.table)
@@ -496,6 +502,10 @@ mod tests {
         let project = Project {
             table,
             filter: None,
+            sort: Some(SortSpec {
+                column: 1,
+                direction: jetsheets_core::SortDirection::Descending,
+            }),
             chart: Some(ChartSpec {
                 kind: jetsheets_charts::ChartKind::Bar,
                 x_column: 0,
@@ -508,7 +518,26 @@ mod tests {
         let loaded = load_project(&path).unwrap();
         fs::remove_file(path).unwrap();
         assert_eq!(loaded.table.rows, project.table.rows);
+        assert_eq!(loaded.sort, project.sort);
         assert_eq!(loaded.chart.unwrap().title, "Valores");
+    }
+
+    #[test]
+    fn opens_previous_project_without_sort_field() {
+        let path = test_path("jetsheet");
+        let project = Project {
+            table: Table::blank(),
+            filter: None,
+            sort: None,
+            chart: None,
+        };
+        save_project(&path, &project).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        json["project"].as_object_mut().unwrap().remove("sort");
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(load_project(&path).unwrap().sort, None);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -517,6 +546,7 @@ mod tests {
         let project = Project {
             table: Table::blank(),
             filter: None,
+            sort: None,
             chart: None,
         };
         save_project(&path, &project).unwrap();
@@ -543,6 +573,7 @@ mod tests {
                 operator: jetsheets_core::Operator::Greater,
                 value: jetsheets_core::FilterValue::Number(10.0),
             })),
+            sort: None,
             chart: None,
         };
         assert!(

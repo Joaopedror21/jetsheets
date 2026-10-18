@@ -7,9 +7,10 @@ use eframe::egui::{
 };
 use jetsheets_charts::{ChartKind, ChartPoint, ChartSpec, prepare_chart};
 use jetsheets_core::{
-    ColumnKind, FilterExpr, FilterSummary, FilterValue, Operator, Table, evaluate_filter, summarize,
+    ColumnKind, FilterExpr, FilterSummary, FilterValue, Operator, SortDirection, SortSpec, Table,
+    evaluate_filter, sort_rows, summarize,
 };
-use jetsheets_language::{ParseError, ParsedFilter, parse_filter, parse_filter_with_override};
+use jetsheets_language::{ParseError, ParsedCommand, parse_command, parse_command_with_override};
 use jetsheets_storage::{Project, export_csv_view, import_csv, load_project, save_project};
 
 use crate::{
@@ -59,15 +60,21 @@ enum ClipboardAction {
     Paste(String),
 }
 
+#[derive(Clone)]
+struct ViewState {
+    filter: Option<FilterExpr>,
+    sort: Option<SortSpec>,
+}
+
 pub struct JetSheetsApp {
     project: Project,
     path: Option<PathBuf>,
     command: String,
-    preview: Option<ParsedFilter>,
+    preview: Option<ParsedCommand>,
     parse_error: Option<ParseError>,
     command_history: Vec<String>,
-    undo: Vec<Option<FilterExpr>>,
-    redo: Vec<Option<FilterExpr>>,
+    undo: Vec<ViewState>,
+    redo: Vec<ViewState>,
     visible_rows: Vec<usize>,
     summary: FilterSummary,
     selected_row: Option<usize>,
@@ -104,6 +111,7 @@ impl JetSheetsApp {
                 vec!["Produto".into(), "Valor".into(), "Quantidade".into()],
             ),
             filter: None,
+            sort: None,
             chart: None,
         };
         let mut app = Self {
@@ -152,7 +160,7 @@ impl JetSheetsApp {
         self.project.table.infer_column_types();
         self.column_widths
             .resize(self.project.table.column_count(), DEFAULT_COLUMN_WIDTH);
-        let visible_rows = match &self.project.filter {
+        let mut visible_rows = match &self.project.filter {
             Some(expr) => match evaluate_filter(&self.project.table, expr) {
                 Ok(indices) => indices,
                 Err(error) => {
@@ -162,6 +170,12 @@ impl JetSheetsApp {
             },
             None => (0..self.project.table.row_count()).collect(),
         };
+        if let Some(spec) = &self.project.sort {
+            match sort_rows(&self.project.table, &visible_rows, spec) {
+                Ok(indices) => visible_rows = indices,
+                Err(error) => self.status = error,
+            }
+        }
         if self.visible_rows != visible_rows {
             self.selection = None;
         }
@@ -230,6 +244,7 @@ impl JetSheetsApp {
                     vec!["Produto".into(), "Valor".into(), "Quantidade".into()],
                 ),
                 filter: None,
+                sort: None,
                 chart: None,
             },
             None,
@@ -396,6 +411,7 @@ impl JetSheetsApp {
                     Project {
                         table,
                         filter: None,
+                        sort: None,
                         chart: None,
                     },
                     None,
@@ -477,9 +493,9 @@ impl JetSheetsApp {
         }
         self.preview = None;
         self.parse_error = None;
-        match parse_filter(&self.command, &self.project.table) {
+        match parse_command(&self.command, &self.project.table) {
             Ok(parsed) => {
-                self.status = "Filtro interpretado. Confira a prévia e confirme.".into();
+                self.status = "Comando interpretado. Confira a prévia e confirme.".into();
                 self.preview = Some(parsed);
             }
             Err(error) => {
@@ -493,46 +509,97 @@ impl JetSheetsApp {
         let Some(parsed) = self.preview.take() else {
             return;
         };
-        if let Err(error) = evaluate_filter(&self.project.table, &parsed.expr) {
+        let validation = match &parsed {
+            ParsedCommand::Filter(parsed) => {
+                evaluate_filter(&self.project.table, &parsed.expr).map(|_| ())
+            }
+            ParsedCommand::Sort(parsed) => {
+                sort_rows(&self.project.table, &[], &parsed.spec).map(|_| ())
+            }
+        };
+        if let Err(error) = validation {
             self.status = format!("Prévia desatualizada: {error}. Interprete o comando novamente.");
             return;
         }
-        self.undo.push(self.project.filter.clone());
-        self.redo.clear();
-        self.project.filter = Some(parsed.expr);
+        self.push_view_history();
+        let is_filter = match parsed {
+            ParsedCommand::Filter(parsed) => {
+                self.project.filter = Some(parsed.expr);
+                true
+            }
+            ParsedCommand::Sort(parsed) => {
+                self.project.sort = Some(parsed.spec);
+                false
+            }
+        };
         self.command_history.push(self.command.clone());
         self.changed();
-        self.status = format!(
-            "Filtro aplicado: {} linhas encontradas.",
-            self.visible_rows.len()
-        );
+        self.status = if is_filter {
+            format!(
+                "Filtro aplicado: {} linhas encontradas.",
+                self.visible_rows.len()
+            )
+        } else {
+            format!(
+                "Ordenação aplicada a {} linhas visíveis.",
+                self.visible_rows.len()
+            )
+        };
+    }
+
+    fn view_state(&self) -> ViewState {
+        ViewState {
+            filter: self.project.filter.clone(),
+            sort: self.project.sort,
+        }
+    }
+
+    fn push_view_history(&mut self) {
+        self.undo.push(self.view_state());
+        self.redo.clear();
+    }
+
+    fn set_sort(&mut self, sort: Option<SortSpec>) {
+        if self.project.sort == sort {
+            return;
+        }
+        self.push_view_history();
+        self.project.sort = sort;
+        self.changed();
+        self.status = if sort.is_some() {
+            "Ordenação aplicada aos resultados.".into()
+        } else {
+            "Ordenação removida.".into()
+        };
     }
 
     fn clear_filter(&mut self) {
         if self.project.filter.is_none() {
             return;
         }
-        self.undo.push(self.project.filter.take());
-        self.redo.clear();
+        self.push_view_history();
+        self.project.filter = None;
         self.changed();
         self.status = "Filtro removido.".into();
     }
 
-    fn undo_filter(&mut self) {
+    fn undo_view(&mut self) {
         if let Some(previous) = self.undo.pop() {
-            self.redo.push(self.project.filter.take());
-            self.project.filter = previous;
+            self.redo.push(self.view_state());
+            self.project.filter = previous.filter;
+            self.project.sort = previous.sort;
             self.changed();
-            self.status = "Filtro desfeito.".into();
+            self.status = "Operação desfeita.".into();
         }
     }
 
-    fn redo_filter(&mut self) {
+    fn redo_view(&mut self) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(self.project.filter.take());
-            self.project.filter = next;
+            self.undo.push(self.view_state());
+            self.project.filter = next.filter;
+            self.project.sort = next.sort;
             self.changed();
-            self.status = "Filtro refeito.".into();
+            self.status = "Operação refeita.".into();
         }
     }
 
@@ -587,19 +654,16 @@ impl JetSheetsApp {
                         }
                     });
                     if ui
-                        .add_enabled(
-                            !self.undo.is_empty(),
-                            egui::Button::new("↶ Desfazer filtro"),
-                        )
+                        .add_enabled(!self.undo.is_empty(), egui::Button::new("↶ Desfazer"))
                         .clicked()
                     {
-                        self.undo_filter();
+                        self.undo_view();
                     }
                     if ui
                         .add_enabled(!self.redo.is_empty(), egui::Button::new("↷ Refazer"))
                         .clicked()
                     {
-                        self.redo_filter();
+                        self.redo_view();
                     }
                     if theme::primary_button(ui, "Importar CSV", colors).clicked() {
                         self.request_replace(ReplaceAction::Import, &ctx);
@@ -662,26 +726,30 @@ impl JetSheetsApp {
             .show(root, |ui| {
                 ui.add_space(10.0);
                 ui.heading("Comandos em português");
-                ui.label("Descreva um filtro usando os nomes das colunas.");
+                ui.label("Descreva um filtro ou uma ordenação usando os nomes das colunas.");
                 ui.add_space(8.0);
                 let input = ui.add(
                     TextEdit::multiline(&mut self.command)
-                        .hint_text("Filtre os produtos com valor acima de 5000 e quantidade maior que 4000")
+                        .hint_text("Filtre valor acima de 5000 ou ordene por valor decrescente")
                         .desired_rows(3),
                 );
                 if input.changed() {
                     self.preview = None;
                     self.parse_error = None;
                 }
-                if theme::primary_button(ui, "Interpretar filtro", colors).clicked() {
+                if theme::primary_button(ui, "Interpretar comando", colors).clicked() {
                     self.interpret();
                 }
                 ui.separator();
 
                 if let Some(preview) = &self.preview {
                     ui.label(RichText::new("Prévia da operação").strong().color(colors.accent_text));
-                    ui.label(&preview.explanation);
-                    if theme::primary_button(ui, "Aplicar filtro", colors).clicked() {
+                    ui.label(preview.explanation());
+                    let action = match preview {
+                        ParsedCommand::Filter(_) => "Aplicar filtro",
+                        ParsedCommand::Sort(_) => "Aplicar ordenação",
+                    };
+                    if theme::primary_button(ui, action, colors).clicked() {
                         self.apply_preview();
                     }
                 }
@@ -701,7 +769,7 @@ impl JetSheetsApp {
                     }
                 }
                 if let Some(column) = chosen_column {
-                    match parse_filter_with_override(&self.command, &self.project.table, Some(column)) {
+                    match parse_command_with_override(&self.command, &self.project.table, Some(column)) {
                         Ok(parsed) => {
                             self.preview = Some(parsed);
                             self.parse_error = None;
@@ -718,6 +786,7 @@ impl JetSheetsApp {
                     ui.label("• valor acima de R$ 5.000");
                     ui.label("• quantidade pelo menos 4 mil e valor até 10.000");
                     ui.label("• categoria contém frutas ou preço entre 100 e 500");
+                    ui.label("• ordene por valor decrescente");
                     ui.label("Filtros usam E/OU. Agrupamentos, somas por categoria e comandos de gráfico serão adicionados em fases futuras.");
                 });
                 ui.collapsing("Comandos aplicados nesta sessão", |ui| {
@@ -769,6 +838,7 @@ impl JetSheetsApp {
                 if let Err(error) = self.project.table.remove_column(column) { self.status = error; }
                 else {
                     self.project.filter = None;
+                    self.project.sort = None;
                     self.project.chart = None;
                     self.undo.clear();
                     self.redo.clear();
@@ -1152,6 +1222,41 @@ impl JetSheetsApp {
                 self.export_results(&ctx);
             }
         });
+        let mut selected_sort = self.project.sort;
+        let sort_label = selected_sort
+            .and_then(|spec| {
+                self.project.table.columns.get(spec.column).map(|column| {
+                    let direction = match spec.direction {
+                        SortDirection::Ascending => "crescente",
+                        SortDirection::Descending => "decrescente",
+                    };
+                    format!("{} · {direction}", column.name)
+                })
+            })
+            .unwrap_or_else(|| "Ordem original".into());
+        ui.horizontal(|ui| {
+            ui.label("Ordenação");
+            egui::ComboBox::from_id_salt("results_sort")
+                .selected_text(sort_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selected_sort, None, "Ordem original");
+                    for (column, metadata) in self.project.table.columns.iter().enumerate() {
+                        for (direction, label) in [
+                            (SortDirection::Ascending, "crescente"),
+                            (SortDirection::Descending, "decrescente"),
+                        ] {
+                            ui.selectable_value(
+                                &mut selected_sort,
+                                Some(SortSpec { column, direction }),
+                                format!("{} · {label}", metadata.name),
+                            );
+                        }
+                    }
+                });
+        });
+        if selected_sort != self.project.sort {
+            self.set_sort(selected_sort);
+        }
         ui.horizontal_wrapped(|ui| {
             theme::metric(
                 ui,
@@ -1523,6 +1628,32 @@ fn describe_filter(expr: &FilterExpr, table: &Table) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portuguese_sort_changes_view_and_can_be_undone() {
+        let ctx = egui::Context::default();
+        let mut app = JetSheetsApp::new(&ctx);
+        for row in [["A", "100", "1"], ["B", "300", "2"], ["C", "200", "3"]] {
+            app.project
+                .table
+                .add_row(row.map(str::to_owned).to_vec())
+                .unwrap();
+        }
+        app.refresh();
+        app.command = "Ordene do maior para o menor valor".into();
+        app.interpret();
+        assert!(matches!(app.preview, Some(ParsedCommand::Sort(_))));
+        app.apply_preview();
+        assert_eq!(app.visible_rows, vec![1, 2, 0]);
+        app.undo_view();
+        assert_eq!(app.visible_rows, vec![0, 1, 2]);
+        app.redo_view();
+        assert_eq!(app.visible_rows, vec![1, 2, 0]);
+        assert_eq!(
+            app.project.sort.unwrap().direction,
+            SortDirection::Descending
+        );
+    }
 
     #[test]
     fn save_and_exit_closes_only_after_current_document_is_saved() {
