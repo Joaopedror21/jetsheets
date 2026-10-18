@@ -1,4 +1,5 @@
 /target/
+/target-verify/
 /dist/
 *.jetsheet.tmp
 *.jetsheet.bak

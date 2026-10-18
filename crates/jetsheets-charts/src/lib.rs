@@ -18,6 +18,38 @@ pub struct ChartSpec {
     pub title: String,
 }
 
+/// Saved dashboard layout. Cards always derive their values from the current
+/// filtered rows; no copied data or stale computed numbers are stored.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardSpec {
+    pub metric_column: Option<usize>,
+    pub charts: Vec<ChartSpec>,
+}
+
+pub const MAX_DASHBOARD_CHARTS: usize = 6;
+
+impl DashboardSpec {
+    pub fn validate(&self, table: &Table) -> Result<(), String> {
+        if self
+            .metric_column
+            .is_some_and(|column| column >= table.column_count())
+        {
+            return Err("A coluna das métricas do dashboard não existe.".into());
+        }
+        if self.charts.len() > MAX_DASHBOARD_CHARTS {
+            return Err(format!(
+                "O dashboard permite até {MAX_DASHBOARD_CHARTS} gráficos."
+            ));
+        }
+        for (index, chart) in self.charts.iter().enumerate() {
+            chart
+                .validate(table)
+                .map_err(|error| format!("Gráfico {} do dashboard: {error}", index + 1))?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChartPoint {
     pub label: String,
@@ -131,6 +163,33 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("não é numérico")
+        );
+    }
+
+    #[test]
+    fn dashboard_rejects_missing_columns_and_excess_cards() {
+        let table = Table::new("Dados", vec!["Nome".into(), "Valor".into()]);
+        let chart = ChartSpec {
+            kind: ChartKind::Bar,
+            x_column: 0,
+            y_column: 1,
+            title: "Valores".into(),
+        };
+        assert!(
+            DashboardSpec {
+                metric_column: Some(2),
+                charts: vec![chart.clone()],
+            }
+            .validate(&table)
+            .is_err()
+        );
+        assert!(
+            DashboardSpec {
+                metric_column: Some(1),
+                charts: vec![chart; MAX_DASHBOARD_CHARTS + 1],
+            }
+            .validate(&table)
+            .is_err()
         );
     }
 }

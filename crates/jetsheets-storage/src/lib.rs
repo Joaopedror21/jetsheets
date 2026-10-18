@@ -1,6 +1,6 @@
 //! Local CSV import and versioned JetSheets project files.
 
-use jetsheets_charts::ChartSpec;
+use jetsheets_charts::{ChartSpec, DashboardSpec};
 use jetsheets_core::{
     AggregateOperation, AggregateSpec, FilterExpr, SortSpec, Table, aggregate_rows,
     evaluate_filter, sort_rows,
@@ -25,6 +25,8 @@ pub struct Project {
     #[serde(default)]
     pub aggregate: Option<AggregateSpec>,
     pub chart: Option<ChartSpec>,
+    #[serde(default)]
+    pub dashboard: DashboardSpec,
 }
 
 #[derive(Deserialize)]
@@ -311,6 +313,10 @@ fn validate_project(project: &Project) -> Result<(), StorageError> {
         spec.validate(&project.table)
             .map_err(StorageError::Project)?;
     }
+    project
+        .dashboard
+        .validate(&project.table)
+        .map_err(StorageError::Project)?;
     Ok(())
 }
 
@@ -587,6 +593,15 @@ mod tests {
                 y_column: 1,
                 title: "Valores".into(),
             }),
+            dashboard: DashboardSpec {
+                metric_column: Some(1),
+                charts: vec![ChartSpec {
+                    kind: jetsheets_charts::ChartKind::Line,
+                    x_column: 0,
+                    y_column: 1,
+                    title: "Dashboard de valores".into(),
+                }],
+            },
         };
         save_project(&path, &project).unwrap();
         save_project(&path, &project).unwrap();
@@ -595,6 +610,7 @@ mod tests {
         assert_eq!(loaded.table.rows, project.table.rows);
         assert_eq!(loaded.sort, project.sort);
         assert_eq!(loaded.aggregate, project.aggregate);
+        assert_eq!(loaded.dashboard, project.dashboard);
         assert_eq!(loaded.chart.unwrap().title, "Valores");
     }
 
@@ -607,15 +623,21 @@ mod tests {
             sort: None,
             aggregate: None,
             chart: None,
+            dashboard: DashboardSpec::default(),
         };
         save_project(&path, &project).unwrap();
         let mut json: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         json["project"].as_object_mut().unwrap().remove("sort");
         json["project"].as_object_mut().unwrap().remove("aggregate");
+        json["project"].as_object_mut().unwrap().remove("dashboard");
         fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(load_project(&path).unwrap().sort, None);
         assert_eq!(load_project(&path).unwrap().aggregate, None);
+        assert_eq!(
+            load_project(&path).unwrap().dashboard,
+            DashboardSpec::default()
+        );
         fs::remove_file(path).unwrap();
     }
 
@@ -628,6 +650,7 @@ mod tests {
             sort: None,
             aggregate: None,
             chart: None,
+            dashboard: DashboardSpec::default(),
         };
         save_project(&path, &project).unwrap();
         let mut json: serde_json::Value =
@@ -656,6 +679,7 @@ mod tests {
             sort: None,
             aggregate: None,
             chart: None,
+            dashboard: DashboardSpec::default(),
         };
         assert!(
             save_project(&path, &project)

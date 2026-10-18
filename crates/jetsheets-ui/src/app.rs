@@ -5,7 +5,9 @@ use eframe::egui::{
     self, Align2, FontId, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, pos2,
     vec2,
 };
-use jetsheets_charts::{ChartKind, ChartPoint, ChartSpec, prepare_chart};
+use jetsheets_charts::{
+    ChartKind, ChartPoint, ChartSpec, DashboardSpec, MAX_DASHBOARD_CHARTS, prepare_chart,
+};
 use jetsheets_core::{
     AggregateOperation, AggregateSpec, ColumnKind, FilterExpr, FilterSummary, FilterValue,
     GroupResult, Operator, SortDirection, SortSpec, Table, aggregate_rows, evaluate_filter,
@@ -74,6 +76,13 @@ struct ViewState {
     aggregate: Option<AggregateSpec>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum MainView {
+    #[default]
+    Table,
+    Dashboard,
+}
+
 pub struct JetSheetsApp {
     project: Project,
     path: Option<PathBuf>,
@@ -96,6 +105,9 @@ pub struct JetSheetsApp {
     chart_page: usize,
     chart_data: Option<Result<Vec<ChartPoint>, String>>,
     aggregate_data: Option<Result<Vec<GroupResult>, String>>,
+    dashboard_data: Vec<Result<Vec<ChartPoint>, String>>,
+    dashboard_pages: Vec<usize>,
+    active_view: MainView,
     column_widths: Vec<f32>,
     status: String,
     worker: Option<Receiver<TaskOutcome>>,
@@ -123,6 +135,7 @@ impl JetSheetsApp {
             sort: None,
             aggregate: None,
             chart: None,
+            dashboard: DashboardSpec::default(),
         };
         let mut app = Self {
             project,
@@ -151,6 +164,9 @@ impl JetSheetsApp {
             chart_page: 0,
             chart_data: None,
             aggregate_data: None,
+            dashboard_data: Vec::new(),
+            dashboard_pages: Vec::new(),
+            active_view: MainView::Table,
             column_widths: Vec::new(),
             status: "Adicione linhas ou importe um arquivo CSV para começar.".into(),
             worker: None,
@@ -205,6 +221,15 @@ impl JetSheetsApp {
             .aggregate
             .as_ref()
             .map(|spec| aggregate_rows(&self.project.table, &self.visible_rows, spec));
+        self.dashboard_data = self
+            .project
+            .dashboard
+            .charts
+            .iter()
+            .map(|spec| prepare_chart(&self.project.table, &self.visible_rows, spec))
+            .collect();
+        self.dashboard_pages
+            .resize(self.project.dashboard.charts.len(), 0);
         self.pending_cell_refresh = false;
         if self
             .selected_row
@@ -243,6 +268,9 @@ impl JetSheetsApp {
         self.chart_page = 0;
         self.chart_data = None;
         self.aggregate_data = None;
+        self.dashboard_data.clear();
+        self.dashboard_pages.clear();
+        self.active_view = MainView::Table;
         self.column_widths.clear();
         self.document_id = self.document_id.wrapping_add(1);
         self.revision = 0;
@@ -264,6 +292,7 @@ impl JetSheetsApp {
                 sort: None,
                 aggregate: None,
                 chart: None,
+                dashboard: DashboardSpec::default(),
             },
             None,
         );
@@ -468,6 +497,7 @@ impl JetSheetsApp {
                         sort: None,
                         aggregate: None,
                         chart: None,
+                        dashboard: DashboardSpec::default(),
                     },
                     None,
                 );
@@ -710,6 +740,9 @@ impl JetSheetsApp {
                     };
                     ui.label(RichText::new(title).size(15.0));
                     ui.separator();
+                    ui.selectable_value(&mut self.active_view, MainView::Table, "Tabela");
+                    ui.selectable_value(&mut self.active_view, MainView::Dashboard, "Dashboard");
+                    ui.separator();
                     ui.menu_button("Arquivo", |ui| {
                         if ui.button("Nova tabela").clicked() {
                             self.request_replace(ReplaceAction::New, &ctx);
@@ -923,6 +956,8 @@ impl JetSheetsApp {
                     self.project.sort = None;
                     self.project.aggregate = None;
                     self.project.chart = None;
+                    self.project.dashboard = DashboardSpec::default();
+                    self.dashboard_pages.clear();
                     self.undo.clear();
                     self.redo.clear();
                     self.preview = None;
@@ -930,7 +965,7 @@ impl JetSheetsApp {
                     self.selection = None;
                     self.focused_cell_id = None;
                     self.changed();
-                    self.status = "Coluna excluída; filtro, ordenação, agrupamento e gráfico foram limpos para evitar referências inválidas.".into();
+                    self.status = "Coluna excluída; filtro, ordenação, agrupamento, gráfico e dashboard foram limpos para evitar referências inválidas.".into();
                 }
             }
         });
@@ -1610,6 +1645,239 @@ impl JetSheetsApp {
         }
     }
 
+    fn add_current_chart_to_dashboard(&mut self) {
+        let Some(chart) = self.project.chart.clone() else {
+            self.status = "Crie um gráfico na Tabela antes de adicioná-lo ao dashboard.".into();
+            return;
+        };
+        if self.project.dashboard.charts.len() >= MAX_DASHBOARD_CHARTS {
+            self.status = format!("O dashboard permite até {MAX_DASHBOARD_CHARTS} gráficos.");
+            return;
+        }
+        self.project.dashboard.charts.push(chart);
+        self.dashboard_pages.push(0);
+        self.changed();
+        self.status = "Gráfico adicionado ao dashboard. Salve o projeto para preservá-lo.".into();
+    }
+
+    fn dashboard_view(&mut self, ui: &mut egui::Ui) {
+        let colors = self.theme.palette();
+        theme::section_header(
+            ui,
+            "Dashboard",
+            "Indicadores e gráficos calculados das linhas visíveis da tabela.",
+            colors,
+        );
+        ui.add_space(theme::SPACE);
+        theme::card(ui, colors, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                theme::metric(
+                    ui,
+                    "Registros analisados",
+                    &self.summary.original_count.to_string(),
+                    colors,
+                );
+                theme::metric(
+                    ui,
+                    "Encontrados",
+                    &self.summary.matched_count.to_string(),
+                    colors,
+                );
+                theme::metric(
+                    ui,
+                    "Seleção",
+                    &format!("{:.1}%", self.summary.percentage),
+                    colors,
+                );
+            });
+            if let Some(expr) = &self.project.filter {
+                ui.label(format!(
+                    "Filtro: {}",
+                    describe_filter(expr, &self.project.table)
+                ));
+            } else {
+                ui.label("Todos os registros estão incluídos.");
+            }
+            let mut metric_column = self.project.dashboard.metric_column;
+            let fallback = self.summary.columns.first().map(|column| column.column);
+            let selected = metric_column
+                .filter(|column| {
+                    self.summary
+                        .columns
+                        .iter()
+                        .any(|stat| stat.column == *column)
+                })
+                .or(fallback);
+            if let Some(column) = selected {
+                ui.horizontal(|ui| {
+                    ui.label("Métricas de");
+                    egui::ComboBox::from_id_salt("dashboard_metric_column")
+                        .selected_text(&self.project.table.columns[column].name)
+                        .show_ui(ui, |ui| {
+                            for stat in &self.summary.columns {
+                                ui.selectable_value(
+                                    &mut metric_column,
+                                    Some(stat.column),
+                                    &self.project.table.columns[stat.column].name,
+                                );
+                            }
+                        });
+                });
+                if let Some(stat) = self
+                    .summary
+                    .columns
+                    .iter()
+                    .find(|stat| stat.column == column)
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        theme::metric(ui, "Soma", &format_number(stat.sum), colors);
+                        theme::metric(
+                            ui,
+                            "Média",
+                            &stat.mean.map(format_number).unwrap_or_else(|| "—".into()),
+                            colors,
+                        );
+                        theme::metric(
+                            ui,
+                            "Mínimo",
+                            &stat.min.map(format_number).unwrap_or_else(|| "—".into()),
+                            colors,
+                        );
+                        theme::metric(
+                            ui,
+                            "Máximo",
+                            &stat.max.map(format_number).unwrap_or_else(|| "—".into()),
+                            colors,
+                        );
+                    });
+                }
+            } else {
+                ui.label("Preencha uma coluna numérica para exibir soma, média e limites.");
+            }
+            if metric_column != self.project.dashboard.metric_column {
+                self.project.dashboard.metric_column = metric_column;
+                self.changed();
+            }
+        });
+        ui.add_space(theme::SPACE);
+        if let Some(groups) = &self.aggregate_data {
+            theme::card(ui, colors, |ui| {
+                theme::section_header(
+                    ui,
+                    "Agrupamento ativo",
+                    "Resumo dos grupos calculado com o filtro atual.",
+                    colors,
+                );
+                match groups {
+                    Ok(groups) => {
+                        let is_sum = self.project.aggregate.is_some_and(|spec| {
+                            matches!(spec.operation, AggregateOperation::Sum { .. })
+                        });
+                        for group in groups.iter().take(10) {
+                            let value = if is_sum {
+                                format!(
+                                    "{} registros · soma {}",
+                                    group.count,
+                                    format_number(group.total)
+                                )
+                            } else {
+                                format!("{} registros", group.count)
+                            };
+                            ui.horizontal(|ui| {
+                                ui.add_sized([180.0, 24.0], egui::Label::new(&group.label));
+                                ui.label(value);
+                            });
+                        }
+                        if groups.len() > 10 {
+                            ui.label(format!(
+                                "Exibindo 10 de {} grupos. Veja todos na Tabela.",
+                                groups.len()
+                            ));
+                        }
+                        if groups.is_empty() {
+                            ui.label("Nenhuma linha corresponde ao filtro atual.");
+                        }
+                    }
+                    Err(error) => theme::error_message(ui, error, colors),
+                }
+            });
+            ui.add_space(theme::SPACE);
+        }
+        ui.horizontal(|ui| {
+            ui.heading("Gráficos salvos");
+            if ui
+                .add_enabled(
+                    self.project.chart.is_some()
+                        && self.project.dashboard.charts.len() < MAX_DASHBOARD_CHARTS,
+                    egui::Button::new("Adicionar gráfico atual"),
+                )
+                .clicked()
+            {
+                self.add_current_chart_to_dashboard();
+            }
+        });
+        if self.project.dashboard.charts.is_empty() {
+            ui.label("Crie um gráfico na Tabela e use “Adicionar gráfico atual” para montar este dashboard.");
+            if ui.button("Abrir Tabela").clicked() {
+                self.active_view = MainView::Table;
+            }
+        }
+        let mut remove = None;
+        for index in 0..self.project.dashboard.charts.len() {
+            ui.add_space(theme::SPACE);
+            theme::card(ui, colors, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Gráfico {} de {}",
+                        index + 1,
+                        self.project.dashboard.charts.len()
+                    ));
+                    if ui.button("Remover").clicked() {
+                        remove = Some(index);
+                    }
+                });
+                match &self.dashboard_data[index] {
+                    Ok(points) => {
+                        let pages = points.len().div_ceil(48).max(1);
+                        let page = &mut self.dashboard_pages[index];
+                        *page = (*page).min(pages - 1);
+                        if pages > 1 {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(*page > 0, egui::Button::new("← Anterior"))
+                                    .clicked()
+                                {
+                                    *page -= 1;
+                                }
+                                ui.label(format!("Página {} de {}", *page + 1, pages));
+                                if ui
+                                    .add_enabled(*page + 1 < pages, egui::Button::new("Próxima →"))
+                                    .clicked()
+                                {
+                                    *page += 1;
+                                }
+                            });
+                        }
+                        let start = *page * 48;
+                        chart_view::render(
+                            ui,
+                            &self.project.dashboard.charts[index],
+                            &points[start..(start + 48).min(points.len())],
+                            colors,
+                        );
+                    }
+                    Err(error) => theme::error_message(ui, error, colors),
+                }
+            });
+        }
+        if let Some(index) = remove {
+            self.project.dashboard.charts.remove(index);
+            self.dashboard_pages.remove(index);
+            self.changed();
+            self.status = "Gráfico removido do dashboard.".into();
+        }
+    }
+
     fn confirmation_dialog(&mut self, ctx: &egui::Context) {
         let Some(action) = self.confirm_replace else {
             return;
@@ -1709,15 +1977,22 @@ impl eframe::App for JetSheetsApp {
                     }
                 });
             });
-        egui::CentralPanel::default().show(root, |ui| {
-            self.table_toolbar(ui);
-            ui.separator();
-            let grid_height = (ui.available_height() * 0.47).clamp(180.0, 470.0);
-            self.table_grid(ui, grid_height);
-            ui.separator();
-            ScrollArea::vertical()
-                .id_salt("results_scroll")
-                .show(ui, |ui| self.results(ui));
+        egui::CentralPanel::default().show(root, |ui| match self.active_view {
+            MainView::Table => {
+                self.table_toolbar(ui);
+                ui.separator();
+                let grid_height = (ui.available_height() * 0.47).clamp(180.0, 470.0);
+                self.table_grid(ui, grid_height);
+                ui.separator();
+                ScrollArea::vertical()
+                    .id_salt("results_scroll")
+                    .show(ui, |ui| self.results(ui));
+            }
+            MainView::Dashboard => {
+                ScrollArea::vertical()
+                    .id_salt("dashboard_scroll")
+                    .show(ui, |ui| self.dashboard_view(ui));
+            }
         });
         self.confirmation_dialog(root.ctx());
         self.close_dialog(root.ctx());
@@ -1809,6 +2084,38 @@ mod tests {
         );
         app.undo_view();
         assert!(app.project.aggregate.is_none());
+    }
+
+    #[test]
+    fn dashboard_cards_follow_filter_and_render_live_values() {
+        egui::__run_test_ui(|ui| {
+            let ctx = ui.ctx().clone();
+            let mut app = JetSheetsApp::new(&ctx);
+            for row in [["A", "100", "1"], ["B", "200", "2"]] {
+                app.project
+                    .table
+                    .add_row(row.map(str::to_owned).to_vec())
+                    .unwrap();
+            }
+            app.project.chart = Some(ChartSpec {
+                kind: ChartKind::Bar,
+                x_column: 0,
+                y_column: 1,
+                title: "Valor por produto".into(),
+            });
+            app.refresh();
+            app.add_current_chart_to_dashboard();
+            assert_eq!(app.dashboard_data[0].as_ref().unwrap().len(), 2);
+            app.project.filter = Some(FilterExpr::Condition(jetsheets_core::Condition {
+                column: 1,
+                operator: Operator::Greater,
+                value: FilterValue::Number(150.0),
+            }));
+            app.refresh();
+            assert_eq!(app.summary.matched_count, 1);
+            assert_eq!(app.dashboard_data[0].as_ref().unwrap()[0].label, "B");
+            app.dashboard_view(ui);
+        });
     }
 
     #[test]

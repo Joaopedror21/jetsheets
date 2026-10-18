@@ -1,5 +1,6 @@
 //! Connected CSV -> filter -> Portuguese aggregation -> export -> project flow.
 
+use jetsheets_charts::DashboardSpec;
 use jetsheets_core::{AggregateOperation, aggregate_rows, evaluate_filter};
 use jetsheets_language::{ParsedCommand, parse_command, parse_filter};
 use jetsheets_storage::{Project, export_aggregate_csv, import_csv, load_project, save_project};
@@ -91,6 +92,7 @@ fn filtered_grouped_sum_exports_and_reopens() {
         sort: None,
         aggregate: Some(command.spec),
         chart: None,
+        dashboard: DashboardSpec::default(),
     };
     save_project(&paths.project, &project).unwrap();
     let reopened = load_project(&paths.project).unwrap();

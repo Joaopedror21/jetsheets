@@ -1,7 +1,7 @@
 //! Integration of the Phase 1 CSV → Portuguese filter → results → chart →
 //! local project flow. No desktop window is needed for the data workflow.
 
-use jetsheets_charts::{ChartKind, ChartSpec, prepare_chart};
+use jetsheets_charts::{ChartKind, ChartSpec, DashboardSpec, prepare_chart};
 use jetsheets_core::{ColumnKind, evaluate_filter, summarize};
 use jetsheets_language::parse_filter;
 use jetsheets_storage::{Project, export_csv_view, import_csv, load_project, save_project};
@@ -118,6 +118,7 @@ fn phase1_csv_filter_results_chart_and_project_roundtrip() {
         sort: None,
         aggregate: None,
         chart: Some(chart),
+        dashboard: DashboardSpec::default(),
     };
     save_project(&paths.project, &project).unwrap();
     let reopened = load_project(&paths.project).unwrap();

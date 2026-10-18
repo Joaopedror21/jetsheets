@@ -1,4 +1,4 @@
-# Arquitetura da Fase 1
+# Arquitetura do JetSheets
 
 JetSheets é um aplicativo desktop offline, escrito inteiramente em Rust.
 
@@ -18,7 +18,7 @@ jetsheets-ui (eframe/egui)
 
 ## Estado e fluxo
 
-O projeto contém uma tabela, o filtro confirmado, a ordenação e a configuração do gráfico. A interface mantém separadamente o comando em digitação, a prévia e o histórico de visualização para desfazer/refazer filtro ou ordenação. Editar uma célula preserva o índice da linha na tabela de origem; resultados e gráfico são recalculados a partir do estado atual. Salvar grava somente dados e visualizações confirmados.
+O projeto contém uma tabela, o filtro confirmado, a ordenação, o agrupamento, a configuração do gráfico e o dashboard. A interface mantém separadamente o comando em digitação, a prévia e o histórico de visualização para desfazer/refazer filtro ou ordenação. Editar uma célula preserva o índice da linha na tabela de origem; resultados, gráficos e indicadores são recalculados a partir do estado atual. Salvar grava somente dados e visualizações confirmados.
 
 ## Evolução da Fase 2
 
@@ -26,8 +26,10 @@ A ordenação por coluna é aplicada sobre os índices das linhas visíveis, sem
 
 Agrupamentos de contagem e soma operam sobre os mesmos índices visíveis, preservando a primeira ordem encontrada e somando apenas células numéricas preenchidas. A tabela agrupada é recalculada após alterações nos dados ou filtros, permite exportação CSV e guarda a especificação no campo opcional `aggregate` do projeto. Arquivos de projeto antigos continuam legíveis.
 
+O dashboard persiste a coluna selecionada para métricas e até seis especificações de gráfico no campo opcional `dashboard` do projeto. Os valores dos cartões não são gravados: são derivados dos índices visíveis após cada alteração de dados, filtro ou ordenação. A leitura de arquivos anteriores cria um dashboard vazio por padrão. Referências a colunas inexistentes são recusadas na validação do projeto.
+
 O instalador/atualizador é um crate Rust separado para Windows. Ele não altera o formato `.jetsheet`. O fluxo de download, verificação e recuperação é descrito em [INSTALLER.md](INSTALLER.md).
 
 ## Limite da Fase 1
 
-O interpretador executa filtros, ordenação e agrupamentos de contagem ou soma em português. XLSX, fórmulas, dashboards e outros tipos de gráficos pertencem a fases posteriores. O arquivo `.jetsheet` usa JSON estruturado e versionado. Compactação e recursos avançados de recuperação ficam para uma evolução do formato.
+O interpretador executa filtros, ordenação e agrupamentos de contagem ou soma em português. XLSX, fórmulas, layouts livres de dashboard e outros tipos de gráficos pertencem a fases posteriores. O arquivo `.jetsheet` usa JSON estruturado e versionado. Compactação e recursos avançados de recuperação ficam para uma evolução do formato.
