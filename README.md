@@ -41,11 +41,11 @@ O arquivo fica em `target/release/jetsheets-installer.exe`. No modo release, tan
 ## Fluxo rápido
 
 1. Use **+ Linha** para começar uma tabela vazia ou **Importar CSV** para abrir um arquivo UTF-8 com cabeçalhos. O arquivo [estoque_exemplo.csv](examples/estoque_exemplo.csv) contém dados sintéticos para experimentar.
-2. Edite os nomes das colunas no cabeçalho e os valores diretamente na grade. Clique em uma célula e use Shift+clique em outra, ou arraste o mouse entre elas, para selecionar um intervalo. Ctrl+C e Ctrl+X copiam ou recortam a seleção, e Ctrl+V cola blocos TSV que caibam nas linhas e colunas visíveis. A inferência de número, moeda, porcentagem, data e texto é atualizada após a edição.
+2. Edite os nomes das colunas no cabeçalho e os valores diretamente na grade. Clique em uma célula e use Shift+clique em outra, ou arraste o mouse entre elas, para selecionar um intervalo. Ctrl+C e Ctrl+X copiam ou recortam a seleção, Ctrl+V cola blocos TSV que caibam nas linhas e colunas visíveis, e Delete apaga o intervalo selecionado. A inferência de número, moeda, porcentagem, data e texto é atualizada após a edição.
 3. Digite `Filtre os produtos com valor acima de 5000 e quantidade maior que 4000`, clique em **Interpretar filtro**, confira a interpretação e clique em **Aplicar filtro**.
 4. Examine a contagem, o percentual e as estatísticas das colunas numéricas. Clique numa célula para ver os detalhes do registro. **Desfazer filtro**, **Refazer** e **Limpar filtro** controlam a visualização sem apagar as linhas de origem. **Exportar CSV** grava somente as linhas visíveis.
 5. Em **Gráfico**, selecione barras ou linhas, os eixos X/Y e um título. O gráfico usa as linhas visíveis e se atualiza quando o filtro ou os dados mudam. Se houver mais de 48 pontos, navegue pelas páginas.
-6. Use **Arquivo → Salvar** para criar um `.jetsheet` e **Arquivo → Abrir projeto** para recuperar tabela, filtro e gráfico. O arquivo é local e versionado.
+6. Use **Arquivo → Salvar** para criar um `.jetsheet` e **Arquivo → Abrir projeto** para recuperar tabela, filtro e gráfico. O arquivo é local e versionado. Ao fechar com alterações pendentes, **Salvar** conclui a saída somente depois que a gravação termina sem erro.
 7. Em **Configurações**, escolha **Jet Dark** ou **Jet Light**. A mudança é imediata e vale para a sessão atual.
 
 O interpretador aceita comparações `>`, `>=`, `<`, `<=`, igualdade, diferença, `entre`, `contém`, `começa com` e `termina com`, além de condições `e`, `ou` e negação. `E` tem precedência sobre `OU`; o intervalo `entre` inclui os limites. Ele entende `5.000`, `R$ 5.000`, `5.000,50` e `5 mil`. Se uma coluna for ambígua, a interface pede uma escolha antes de gerar a prévia.

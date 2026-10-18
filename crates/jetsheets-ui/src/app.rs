@@ -55,6 +55,7 @@ enum ReplaceAction {
 enum ClipboardAction {
     Copy,
     Cut,
+    Clear,
     Paste(String),
 }
 
@@ -87,6 +88,7 @@ pub struct JetSheetsApp {
     document_id: u64,
     confirm_replace: Option<ReplaceAction>,
     confirm_close: bool,
+    close_after_save: bool,
     allow_close: bool,
     pending_cell_refresh: bool,
 }
@@ -138,6 +140,7 @@ impl JetSheetsApp {
             document_id: 0,
             confirm_replace: None,
             confirm_close: false,
+            close_after_save: false,
             allow_close: false,
             pending_cell_refresh: false,
         };
@@ -303,6 +306,9 @@ impl JetSheetsApp {
             self.status = "Aguarde a operação de arquivo em andamento.".into();
             return;
         }
+        if self.pending_cell_refresh {
+            self.refresh();
+        }
         let path = if save_as { None } else { self.path.clone() }.or_else(|| {
             rfd::FileDialog::new()
                 .add_filter("Projeto JetSheets", &["jetsheet"])
@@ -340,6 +346,9 @@ impl JetSheetsApp {
             self.status = "Aguarde a operação de arquivo em andamento.".into();
             return;
         }
+        if self.pending_cell_refresh {
+            self.refresh();
+        }
         let Some(mut path) = rfd::FileDialog::new()
             .add_filter("Arquivo CSV", &["csv"])
             .set_file_name("resultados.csv")
@@ -366,7 +375,7 @@ impl JetSheetsApp {
         self.status = "Exportando resultados CSV...".into();
     }
 
-    fn poll_worker(&mut self) {
+    fn poll_worker(&mut self, ctx: &egui::Context) {
         let result = match self.worker.as_ref().map(Receiver::try_recv) {
             Some(Ok(result)) => result,
             Some(Err(TryRecvError::Disconnected)) => {
@@ -428,15 +437,23 @@ impl JetSheetsApp {
                     self.path = Some(path);
                     if revision == self.revision {
                         self.saved_revision = revision;
+                        self.status = "Projeto salvo.".into();
+                        if self.close_after_save {
+                            self.allow_close = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    } else {
+                        self.status = "Projeto salvo, mas há alterações posteriores que ainda precisam ser salvas.".into();
                     }
-                    self.status = "Projeto salvo.".into();
                 } else {
                     self.status = "O projeto anterior foi salvo; a nova tabela continua sem arquivo associado.".into();
                 }
+                self.close_after_save = false;
             }
             TaskOutcome::Saved {
                 result: Err(error), ..
             } => {
+                self.close_after_save = false;
                 self.status = format!("Falha ao salvar: {error}");
             }
             TaskOutcome::Exported {
@@ -455,6 +472,9 @@ impl JetSheetsApp {
     }
 
     fn interpret(&mut self) {
+        if self.pending_cell_refresh {
+            self.refresh();
+        }
         self.preview = None;
         self.parse_error = None;
         match parse_filter(&self.command, &self.project.table) {
@@ -776,12 +796,22 @@ impl JetSheetsApp {
         let action = ui.input_mut(|input| {
             let index = input.events.iter().position(|event| match event {
                 egui::Event::Copy | egui::Event::Cut => block_selected,
+                egui::Event::Key {
+                    key: egui::Key::Delete,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => block_selected && !modifiers.command,
                 egui::Event::Paste(text) => text.contains(['\t', '\r', '\n']),
                 _ => false,
             })?;
             match input.events.remove(index) {
                 egui::Event::Copy => Some(ClipboardAction::Copy),
                 egui::Event::Cut => Some(ClipboardAction::Cut),
+                egui::Event::Key {
+                    key: egui::Key::Delete,
+                    ..
+                } => Some(ClipboardAction::Clear),
                 egui::Event::Paste(text) => Some(ClipboardAction::Paste(text)),
                 _ => None,
             }
@@ -814,6 +844,15 @@ impl JetSheetsApp {
                     Ok(count) => {
                         self.changed();
                         self.status = format!("{count} células coladas.");
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+            Some(ClipboardAction::Clear) => {
+                match selection.clear(&mut self.project.table, &self.visible_rows) {
+                    Ok(count) => {
+                        self.changed();
+                        self.status = format!("{count} células apagadas.");
                     }
                     Err(error) => self.status = error,
                 }
@@ -1086,7 +1125,7 @@ impl JetSheetsApp {
         if let Some(selection) = self.selection
             && selection.cell_count() > 1
         {
-            ui.label(format!("{} células selecionadas · Ctrl+C para copiar, Ctrl+X para recortar; Ctrl+V cola um bloco TSV.", selection.cell_count()));
+            ui.label(format!("{} células selecionadas · Ctrl+C copia, Ctrl+X recorta, Ctrl+V cola e Delete apaga o intervalo.", selection.cell_count()));
         }
         if rows.is_empty() {
             ui.label(
@@ -1383,6 +1422,7 @@ impl JetSheetsApp {
             Some(1) => {
                 self.confirm_close = false;
                 self.save_project(ctx, false);
+                self.close_after_save = self.worker.is_some();
             }
             Some(2) => {
                 self.confirm_close = false;
@@ -1396,7 +1436,7 @@ impl JetSheetsApp {
 
 impl eframe::App for JetSheetsApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll_worker();
+        self.poll_worker(root.ctx());
         self.header(root);
         self.command_panel(root);
         let colors = self.theme.palette();
@@ -1483,6 +1523,61 @@ fn describe_filter(expr: &FilterExpr, table: &Table) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_and_exit_closes_only_after_current_document_is_saved() {
+        let ctx = egui::Context::default();
+        let mut app = JetSheetsApp::new(&ctx);
+        app.revision = 2;
+        app.close_after_save = true;
+        let (sender, receiver) = mpsc::channel();
+        app.worker = Some(receiver);
+        sender
+            .send(TaskOutcome::Saved {
+                path: PathBuf::from("test.jetsheet"),
+                document_id: app.document_id,
+                revision: app.revision,
+                result: Ok(()),
+            })
+            .unwrap();
+        app.poll_worker(&ctx);
+        assert!(app.allow_close);
+        assert_eq!(app.saved_revision, 2);
+        assert!(!app.close_after_save);
+
+        let mut app = JetSheetsApp::new(&ctx);
+        app.revision = 3;
+        app.close_after_save = true;
+        let (sender, receiver) = mpsc::channel();
+        app.worker = Some(receiver);
+        sender
+            .send(TaskOutcome::Saved {
+                path: PathBuf::from("test.jetsheet"),
+                document_id: app.document_id,
+                revision: 2,
+                result: Ok(()),
+            })
+            .unwrap();
+        app.poll_worker(&ctx);
+        assert!(!app.allow_close);
+        assert_eq!(app.saved_revision, 0);
+        assert!(!app.close_after_save);
+    }
+
+    #[test]
+    fn interpreting_after_cell_edit_updates_column_type() {
+        let ctx = egui::Context::default();
+        let mut app = JetSheetsApp::new(&ctx);
+        app.project
+            .table
+            .add_row(vec!["Produto".into(), "5000".into(), "2".into()])
+            .unwrap();
+        app.pending_cell_refresh = true;
+        app.command = "valor acima de 4000".into();
+        app.interpret();
+        assert!(app.preview.is_some());
+        assert_eq!(app.project.table.columns[1].kind, ColumnKind::Currency);
+    }
 
     #[test]
     fn editor_and_results_render_from_a_filtered_table() {
@@ -1608,6 +1703,20 @@ mod tests {
         frame(&ctx, &mut app, release(last, true));
         frame(&ctx, &mut app, vec![egui::Event::Copy]);
         assert_eq!(app.status, "4 células copiadas.");
+        frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert_eq!(app.status, "4 células apagadas.");
+        assert_eq!(&app.project.table.rows[0][..2], &["", ""]);
+        assert_eq!(&app.project.table.rows[1][..2], &["", ""]);
 
         frame(&ctx, &mut app, press(first, false));
         frame(&ctx, &mut app, vec![egui::Event::PointerMoved(last)]);
