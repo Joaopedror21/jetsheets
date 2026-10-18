@@ -7,3 +7,4 @@ license.workspace = true
 
 [dependencies]
 jetsheets-core = { path = "../jetsheets-core" }
+jetsheets-charts = { path = "../jetsheets-charts" }

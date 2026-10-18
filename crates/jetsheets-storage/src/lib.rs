@@ -26,6 +26,8 @@ pub struct Project {
     #[serde(default)]
     pub sort: Option<SortSpec>,
     #[serde(default)]
+    pub visible_limit: Option<usize>,
+    #[serde(default)]
     pub aggregate: Option<AggregateSpec>,
     pub chart: Option<ChartSpec>,
     #[serde(default)]
@@ -323,6 +325,13 @@ fn validate_project(project: &Project) -> Result<(), StorageError> {
     if let Some(sort) = &project.sort {
         sort_rows(&project.table, &[], sort)
             .map_err(|error| StorageError::Project(format!("Ordenação salva inválida: {error}")))?;
+    }
+    if project.visible_limit == Some(0)
+        || project.visible_limit.is_some_and(|limit| limit > 1_000_000)
+    {
+        return Err(StorageError::Project(
+            "Limite de registros salvo inválido.".into(),
+        ));
     }
     if let Some(aggregate) = &project.aggregate {
         aggregate_rows(&project.table, &[], aggregate).map_err(|error| {
@@ -625,6 +634,7 @@ mod tests {
                 column: 1,
                 direction: jetsheets_core::SortDirection::Descending,
             }),
+            visible_limit: Some(1),
             aggregate: Some(AggregateSpec {
                 group_column: 0,
                 operation: jetsheets_core::AggregateOperation::Count,
@@ -651,6 +661,7 @@ mod tests {
         fs::remove_file(path).unwrap();
         assert_eq!(loaded.table.rows, project.table.rows);
         assert_eq!(loaded.sort, project.sort);
+        assert_eq!(loaded.visible_limit, project.visible_limit);
         assert_eq!(loaded.aggregate, project.aggregate);
         assert_eq!(loaded.dashboard, project.dashboard);
         assert_eq!(loaded.chart.unwrap().title, "Valores");
@@ -663,6 +674,7 @@ mod tests {
             table: Table::blank(),
             filter: None,
             sort: None,
+            visible_limit: None,
             aggregate: None,
             chart: None,
             dashboard: DashboardSpec::default(),
@@ -671,10 +683,15 @@ mod tests {
         let mut json: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         json["project"].as_object_mut().unwrap().remove("sort");
+        json["project"]
+            .as_object_mut()
+            .unwrap()
+            .remove("visible_limit");
         json["project"].as_object_mut().unwrap().remove("aggregate");
         json["project"].as_object_mut().unwrap().remove("dashboard");
         fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(load_project(&path).unwrap().sort, None);
+        assert_eq!(load_project(&path).unwrap().visible_limit, None);
         assert_eq!(load_project(&path).unwrap().aggregate, None);
         assert_eq!(
             load_project(&path).unwrap().dashboard,
@@ -690,6 +707,7 @@ mod tests {
             table: Table::blank(),
             filter: None,
             sort: None,
+            visible_limit: None,
             aggregate: None,
             chart: None,
             dashboard: DashboardSpec::default(),
@@ -719,6 +737,7 @@ mod tests {
                 value: jetsheets_core::FilterValue::Number(10.0),
             })),
             sort: None,
+            visible_limit: None,
             aggregate: None,
             chart: None,
             dashboard: DashboardSpec::default(),
@@ -728,6 +747,27 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Filtro salvo inválido")
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejects_zero_visible_limit_in_saved_project() {
+        let path = test_path("jetsheet");
+        let project = Project {
+            table: Table::blank(),
+            filter: None,
+            sort: None,
+            visible_limit: Some(0),
+            aggregate: None,
+            chart: None,
+            dashboard: DashboardSpec::default(),
+        };
+        assert!(
+            save_project(&path, &project)
+                .unwrap_err()
+                .to_string()
+                .contains("Limite")
         );
         assert!(!path.exists());
     }

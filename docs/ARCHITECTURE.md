@@ -18,11 +18,13 @@ jetsheets-ui (eframe/egui)
 
 ## Estado e fluxo
 
-O projeto contém uma tabela, o filtro confirmado, a ordenação, o agrupamento, a configuração do gráfico e o dashboard. A interface mantém separadamente o comando em digitação, a prévia e o histórico de visualização para desfazer/refazer filtro ou ordenação. Editar uma célula preserva o índice da linha na tabela de origem; resultados, gráficos e indicadores são recalculados a partir do estado atual. Salvar grava somente dados e visualizações confirmados.
+O projeto contém uma tabela, o filtro confirmado, a ordenação, o limite opcional de linhas visíveis, o agrupamento, a configuração do gráfico e o dashboard. A interface mantém separadamente o comando em digitação, a prévia e o histórico de visualização para desfazer/refazer filtro, ordenação, ranking ou agrupamento. Editar uma célula preserva o índice da linha na tabela de origem; resultados, gráficos e indicadores são recalculados a partir do estado atual. Salvar grava somente dados e visualizações confirmados.
 
 ## Evolução da Fase 2
 
 A ordenação por coluna é aplicada sobre os índices das linhas visíveis, sem reorganizar os dados de origem. Números brasileiros e datas são comparados pelos seus valores, texto ignora diferenças de maiúsculas e acentos e células vazias ficam no fim em ambas as direções. O comando em português e o seletor de resultados usam a mesma operação. O campo opcional `sort` no projeto mantém compatibilidade de leitura com arquivos `.jetsheet` anteriores.
+
+O ranking em português aplica a ordenação e depois reduz os índices visíveis a até `visible_limit` registros. Resumos, gráficos, dashboard e exportações usam esses mesmos índices. O limite é opcional no projeto para manter a leitura de arquivos anteriores; ao mudar a ordenação manualmente, a interface o remove. Um comando de gráfico gera uma `ChartSpec` validada e usa a mesma preparação de dados do painel visual; o gráfico resultante pode ser adicionado ao dashboard.
 
 Agrupamentos de contagem, soma e média operam sobre os mesmos índices visíveis, preservando a primeira ordem encontrada e considerando apenas células numéricas preenchidas. A tabela agrupada é recalculada após alterações nos dados ou filtros, permite exportação CSV e guarda a especificação no campo opcional `aggregate` do projeto. Arquivos de projeto antigos continuam legíveis.
 
@@ -34,4 +36,4 @@ O instalador/atualizador é um crate Rust separado para Windows. Ele não altera
 
 ## Limite da Fase 1
 
-O interpretador executa filtros, ordenação e agrupamentos de contagem, soma ou média em português. Fórmulas, layouts livres de dashboard e outros tipos de gráficos pertencem a fases posteriores. O arquivo `.jetsheet` usa JSON estruturado e versionado. Compactação e recursos avançados de recuperação ficam para uma evolução do formato.
+O interpretador executa filtros, ordenação, rankings simples, agrupamentos de contagem, soma ou média e comandos explícitos para gráficos de barras ou linhas em português. Fórmulas, comandos compostos avançados, layouts livres de dashboard e outros tipos de gráficos pertencem a fases posteriores. O arquivo `.jetsheet` usa JSON estruturado e versionado. Compactação e recursos avançados de recuperação ficam para uma evolução do formato.

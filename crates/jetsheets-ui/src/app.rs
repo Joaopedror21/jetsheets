@@ -89,6 +89,7 @@ enum ClipboardAction {
 struct ViewState {
     filter: Option<FilterExpr>,
     sort: Option<SortSpec>,
+    visible_limit: Option<usize>,
     aggregate: Option<AggregateSpec>,
 }
 
@@ -150,6 +151,7 @@ impl JetSheetsApp {
             ),
             filter: None,
             sort: None,
+            visible_limit: None,
             aggregate: None,
             chart: None,
             dashboard: DashboardSpec::default(),
@@ -220,6 +222,9 @@ impl JetSheetsApp {
                 Ok(indices) => visible_rows = indices,
                 Err(error) => self.status = error,
             }
+        }
+        if let Some(limit) = self.project.visible_limit {
+            visible_rows.truncate(limit);
         }
         if self.visible_rows != visible_rows {
             self.selection = None;
@@ -309,6 +314,7 @@ impl JetSheetsApp {
                 ),
                 filter: None,
                 sort: None,
+                visible_limit: None,
                 aggregate: None,
                 chart: None,
                 dashboard: DashboardSpec::default(),
@@ -624,6 +630,7 @@ impl JetSheetsApp {
                         table,
                         filter: None,
                         sort: None,
+                        visible_limit: None,
                         aggregate: None,
                         chart: None,
                         dashboard: DashboardSpec::default(),
@@ -666,6 +673,7 @@ impl JetSheetsApp {
                         table: imported.table,
                         filter: None,
                         sort: None,
+                        visible_limit: None,
                         aggregate: None,
                         chart: None,
                         dashboard: DashboardSpec::default(),
@@ -789,12 +797,21 @@ impl JetSheetsApp {
             ParsedCommand::Aggregate(parsed) => {
                 aggregate_rows(&self.project.table, &self.visible_rows, &parsed.spec).map(|_| ())
             }
+            ParsedCommand::Chart(parsed) => {
+                prepare_chart(&self.project.table, &self.visible_rows, &parsed.spec).map(|_| ())
+            }
+            ParsedCommand::Top(parsed) => {
+                sort_rows(&self.project.table, &self.visible_rows, &parsed.sort).map(|_| ())
+            }
         };
         if let Err(error) = validation {
             self.status = format!("Prévia desatualizada: {error}. Interprete o comando novamente.");
             return;
         }
-        self.push_view_history();
+        let is_chart = matches!(&parsed, ParsedCommand::Chart(_));
+        if !is_chart {
+            self.push_view_history();
+        }
         let operation = match parsed {
             ParsedCommand::Filter(parsed) => {
                 self.project.filter = Some(parsed.expr);
@@ -808,19 +825,38 @@ impl JetSheetsApp {
                 self.project.aggregate = Some(parsed.spec);
                 "Agrupamento"
             }
+            ParsedCommand::Chart(parsed) => {
+                self.project.chart = Some(parsed.spec);
+                self.chart_draft = None;
+                self.chart_page = 0;
+                "Gráfico"
+            }
+            ParsedCommand::Top(parsed) => {
+                self.project.sort = Some(parsed.sort);
+                self.project.visible_limit = Some(parsed.count);
+                "Ranking"
+            }
         };
         self.command_history.push(self.command.clone());
         self.changed();
-        self.status = format!(
-            "{operation} aplicado a {} linhas visíveis.",
-            self.visible_rows.len()
-        );
+        self.status = if is_chart {
+            format!(
+                "Gráfico criado com {} linhas visíveis. Veja o painel Gráfico em Resultados; você pode adicioná-lo ao Dashboard.",
+                self.visible_rows.len()
+            )
+        } else {
+            format!(
+                "{operation} aplicado a {} linhas visíveis.",
+                self.visible_rows.len()
+            )
+        };
     }
 
     fn view_state(&self) -> ViewState {
         ViewState {
             filter: self.project.filter.clone(),
             sort: self.project.sort,
+            visible_limit: self.project.visible_limit,
             aggregate: self.project.aggregate,
         }
     }
@@ -836,12 +872,23 @@ impl JetSheetsApp {
         }
         self.push_view_history();
         self.project.sort = sort;
+        self.project.visible_limit = None;
         self.changed();
         self.status = if sort.is_some() {
             "Ordenação aplicada aos resultados.".into()
         } else {
             "Ordenação removida.".into()
         };
+    }
+
+    fn clear_visible_limit(&mut self) {
+        if self.project.visible_limit.is_none() {
+            return;
+        }
+        self.push_view_history();
+        self.project.visible_limit = None;
+        self.changed();
+        self.status = "Limite de registros removido.".into();
     }
 
     fn clear_filter(&mut self) {
@@ -869,6 +916,7 @@ impl JetSheetsApp {
             self.redo.push(self.view_state());
             self.project.filter = previous.filter;
             self.project.sort = previous.sort;
+            self.project.visible_limit = previous.visible_limit;
             self.project.aggregate = previous.aggregate;
             self.changed();
             self.status = "Operação desfeita.".into();
@@ -880,6 +928,7 @@ impl JetSheetsApp {
             self.undo.push(self.view_state());
             self.project.filter = next.filter;
             self.project.sort = next.sort;
+            self.project.visible_limit = next.visible_limit;
             self.project.aggregate = next.aggregate;
             self.changed();
             self.status = "Operação refeita.".into();
@@ -1048,6 +1097,8 @@ impl JetSheetsApp {
                         ParsedCommand::Filter(_) => "Aplicar filtro",
                         ParsedCommand::Sort(_) => "Aplicar ordenação",
                         ParsedCommand::Aggregate(_) => "Criar agrupamento",
+                        ParsedCommand::Chart(_) => "Criar gráfico",
+                        ParsedCommand::Top(_) => "Mostrar registros",
                     };
                     if theme::primary_button(ui, action, colors).clicked() {
                         self.apply_preview();
@@ -1100,7 +1151,9 @@ impl JetSheetsApp {
                     ui.label("• agrupe por categoria");
                     ui.label("• some valor por categoria");
                     ui.label("• calcule média de valor por categoria");
-                    ui.label("Filtros usam E/OU. Comandos de gráfico ainda não estão disponíveis.");
+                    ui.label("• crie um gráfico de barras de valor por produto");
+                    ui.label("• mostre os 10 produtos mais caros");
+                    ui.label("Gráficos por comando usam as linhas visíveis. Critérios combinados de ranking e gráfico ainda não estão disponíveis em uma única frase.");
                 });
                 ui.collapsing("Comandos aplicados nesta sessão", |ui| {
                     for command in self.command_history.iter().rev() {
@@ -1155,6 +1208,7 @@ impl JetSheetsApp {
                 else {
                     self.project.filter = None;
                     self.project.sort = None;
+                    self.project.visible_limit = None;
                     self.project.aggregate = None;
                     self.project.chart = None;
                     self.project.dashboard = DashboardSpec::default();
@@ -1578,6 +1632,16 @@ impl JetSheetsApp {
         });
         if selected_sort != self.project.sort {
             self.set_sort(selected_sort);
+        }
+        if let Some(limit) = self.project.visible_limit {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "Mostrando até {limit} primeiros registros na ordem atual."
+                ));
+                if ui.button("Mostrar todos").clicked() {
+                    self.clear_visible_limit();
+                }
+            });
         }
         ui.horizontal_wrapped(|ui| {
             theme::metric(
@@ -2296,6 +2360,78 @@ mod tests {
         assert_eq!(app.visible_rows, vec![0]);
         assert!(app.status.contains("Fórmulas não preservadas"));
         assert!(app.revision != app.saved_revision);
+    }
+
+    #[test]
+    fn chart_command_uses_filtered_rows_and_populates_dashboard() {
+        egui::__run_test_ui(|ui| {
+            let ctx = ui.ctx().clone();
+            let mut app = JetSheetsApp::new(&ctx);
+            for row in [["A", "100", "1"], ["B", "200", "2"]] {
+                app.project
+                    .table
+                    .add_row(row.map(str::to_owned).to_vec())
+                    .unwrap();
+            }
+            app.project.table.infer_column_types();
+            app.project.filter = Some(FilterExpr::Condition(jetsheets_core::Condition {
+                column: 1,
+                operator: Operator::Greater,
+                value: FilterValue::Number(150.0),
+            }));
+            app.refresh();
+            app.command = "Crie um gráfico de barras de valor por produto".into();
+            app.interpret();
+            assert!(matches!(app.preview, Some(ParsedCommand::Chart(_))));
+            app.apply_preview();
+            assert_eq!(app.chart_data.as_ref().unwrap().as_ref().unwrap().len(), 1);
+            assert_eq!(
+                app.chart_data.as_ref().unwrap().as_ref().unwrap()[0].label,
+                "B"
+            );
+            app.add_current_chart_to_dashboard();
+            assert_eq!(app.dashboard_data[0].as_ref().unwrap()[0].label, "B");
+            app.dashboard_view(ui);
+        });
+    }
+
+    #[test]
+    fn top_command_limits_chart_and_xlsx_export_and_can_be_undone() {
+        let ctx = egui::Context::default();
+        let mut app = JetSheetsApp::new(&ctx);
+        for row in [["A", "100", "1"], ["B", "300", "2"], ["C", "200", "3"]] {
+            app.project
+                .table
+                .add_row(row.map(str::to_owned).to_vec())
+                .unwrap();
+        }
+        app.project.table.infer_column_types();
+        app.project.chart = Some(ChartSpec {
+            kind: ChartKind::Bar,
+            x_column: 0,
+            y_column: 1,
+            title: "Valores".into(),
+        });
+        app.refresh();
+        app.command = "Mostre os 2 produtos mais caros".into();
+        app.interpret();
+        assert!(matches!(app.preview, Some(ParsedCommand::Top(_))));
+        app.apply_preview();
+        assert_eq!(app.visible_rows, vec![1, 2]);
+        assert_eq!(app.chart_data.as_ref().unwrap().as_ref().unwrap().len(), 2);
+        let path =
+            std::env::temp_dir().join(format!("jetsheets-top-test-{}.xlsx", std::process::id()));
+        export_xlsx_view(&path, &app.project.table, &app.visible_rows).unwrap();
+        let exported = import_xlsx(&path, "Resultados").unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(exported.table.rows[0][0], "B");
+        assert_eq!(exported.table.rows[1][0], "C");
+        app.undo_view();
+        assert_eq!(app.visible_rows, vec![0, 1, 2]);
+        app.redo_view();
+        assert_eq!(app.visible_rows, vec![1, 2]);
+        app.clear_visible_limit();
+        assert_eq!(app.visible_rows, vec![1, 2, 0]);
     }
 
     #[test]

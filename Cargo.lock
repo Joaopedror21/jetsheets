@@ -954,7 +954,7 @@ version = "0.1.0"
 
 [[package]]
 name = "jetsheets-installer"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "eframe",
  "jetsheets-diagnostics",
@@ -968,6 +968,7 @@ dependencies = [
 name = "jetsheets-language"
 version = "0.1.0"
 dependencies = [
+ "jetsheets-charts",
  "jetsheets-core",
 ]
 
@@ -985,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "jetsheets-ui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "eframe",
  "jetsheets-charts",

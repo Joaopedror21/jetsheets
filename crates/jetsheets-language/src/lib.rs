@@ -1,6 +1,7 @@
 //! Deterministic Portuguese filter commands. This crate only builds a typed
 //! expression; the data engine owns execution and result statistics.
 
+use jetsheets_charts::{ChartKind, ChartSpec};
 use jetsheets_core::{
     AggregateOperation, AggregateSpec, ColumnKind, Condition, FilterExpr, FilterValue, Operator,
     SortDirection, SortSpec, Table, parse_br_number,
@@ -27,10 +28,25 @@ pub struct ParsedAggregate {
 }
 
 #[derive(Debug, Clone)]
+pub struct ParsedChart {
+    pub spec: ChartSpec,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedTop {
+    pub count: usize,
+    pub sort: SortSpec,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum ParsedCommand {
     Filter(ParsedFilter),
     Sort(ParsedSort),
     Aggregate(ParsedAggregate),
+    Chart(ParsedChart),
+    Top(ParsedTop),
 }
 
 impl ParsedCommand {
@@ -39,6 +55,8 @@ impl ParsedCommand {
             Self::Filter(parsed) => &parsed.explanation,
             Self::Sort(parsed) => &parsed.explanation,
             Self::Aggregate(parsed) => &parsed.explanation,
+            Self::Chart(parsed) => &parsed.explanation,
+            Self::Top(parsed) => &parsed.explanation,
         }
     }
 }
@@ -53,11 +71,15 @@ pub fn parse_command_with_override(
     chosen_column: Option<usize>,
 ) -> Result<ParsedCommand, ParseError> {
     let tokens = tokenize(command);
-    if tokens
+    if is_top_intent(&tokens) {
+        parse_top(&tokens, table, chosen_column).map(ParsedCommand::Top)
+    } else if tokens
         .first()
         .is_some_and(|token| is_sort_intent(&token.norm))
     {
         parse_sort(&tokens, table, chosen_column).map(ParsedCommand::Sort)
+    } else if is_chart_intent(&tokens) {
+        parse_chart(&tokens, table, chosen_column).map(ParsedCommand::Chart)
     } else if tokens
         .first()
         .is_some_and(|token| is_aggregate_intent(&token.norm))
@@ -66,6 +88,237 @@ pub fn parse_command_with_override(
     } else {
         parse_filter_with_override(command, table, chosen_column).map(ParsedCommand::Filter)
     }
+}
+
+fn top_rank_at(tokens: &[Token]) -> Option<usize> {
+    tokens.windows(2).position(|pair| {
+        matches!(pair[0].norm.as_str(), "mais" | "menos")
+            && matches!(
+                pair[1].norm.as_str(),
+                "caro"
+                    | "caros"
+                    | "cara"
+                    | "caras"
+                    | "barato"
+                    | "baratos"
+                    | "barata"
+                    | "baratas"
+                    | "vendido"
+                    | "vendidos"
+                    | "vendida"
+                    | "vendidas"
+            )
+    })
+}
+
+fn is_top_intent(tokens: &[Token]) -> bool {
+    tokens.first().is_some_and(|token| {
+        matches!(
+            token.norm.as_str(),
+            "mostre" | "mostrar" | "exiba" | "exibir"
+        )
+    }) && top_rank_at(tokens).is_some()
+}
+
+fn parse_top(
+    tokens: &[Token],
+    table: &Table,
+    chosen_column: Option<usize>,
+) -> Result<ParsedTop, ParseError> {
+    let rank_at = top_rank_at(tokens).expect("top intent requires a ranking phrase");
+    if rank_at + 2 != tokens.len() {
+        return Err(ParseError::Unsupported(
+            "use uma classificação por vez; outros critérios podem ser aplicados como filtros antes".into(),
+        ));
+    }
+    let counts: Vec<f64> = tokens[1..rank_at]
+        .iter()
+        .filter_map(|token| parse_br_number(&token.raw))
+        .collect();
+    let [count] = counts.as_slice() else {
+        return Err(ParseError::Unsupported(
+            "informe uma quantidade, por exemplo 'Mostre os 10 produtos mais caros'".into(),
+        ));
+    };
+    if !count.is_finite() || *count < 1.0 || *count > 1_000_000.0 || count.fract() != 0.0 {
+        return Err(ParseError::InvalidValue(
+            "a quantidade deve ser um número inteiro entre 1 e 1.000.000".into(),
+        ));
+    }
+    let count = *count as usize;
+    let adjective = tokens[rank_at + 1].norm.as_str();
+    let class = if adjective.starts_with("vendid") {
+        "sales"
+    } else {
+        "price"
+    };
+    let candidates: Vec<usize> = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| is_numeric_kind(&column.kind))
+        .filter(|(_, column)| {
+            normalize(&column.name).split_whitespace().any(|word| {
+                if class == "sales" {
+                    matches!(
+                        word,
+                        "venda" | "vendas" | "vendido" | "vendidos" | "vendida" | "vendidas"
+                    )
+                } else {
+                    alias_class(word) == Some(class)
+                }
+            })
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if candidates.is_empty() {
+        return Err(ParseError::UnknownColumn(
+            if class == "price" {
+                "valor/preço"
+            } else {
+                "vendas/quantidade vendida"
+            }
+            .into(),
+        ));
+    }
+    let column = select_column(adjective, candidates, table, chosen_column)?;
+    let direction = match (
+        tokens[rank_at].norm.as_str(),
+        adjective.starts_with("barat"),
+    ) {
+        ("mais", true) | ("menos", false) => SortDirection::Ascending,
+        _ => SortDirection::Descending,
+    };
+    let rank = if direction == SortDirection::Descending {
+        "maiores"
+    } else {
+        "menores"
+    };
+    Ok(ParsedTop {
+        count,
+        sort: SortSpec { column, direction },
+        explanation: format!(
+            "Mostrar até {count} registros com os {rank} valores de '{}', após o filtro atual.",
+            table.columns[column].name
+        ),
+    })
+}
+
+fn is_chart_intent(tokens: &[Token]) -> bool {
+    tokens.first().is_some_and(|token| {
+        matches!(
+            token.norm.as_str(),
+            "crie" | "criar" | "gere" | "gerar" | "grafico"
+        )
+    }) && tokens.iter().take(4).any(|token| token.norm == "grafico")
+}
+
+fn parse_chart(
+    tokens: &[Token],
+    table: &Table,
+    chosen_column: Option<usize>,
+) -> Result<ParsedChart, ParseError> {
+    let chart_at = tokens
+        .iter()
+        .position(|token| token.norm == "grafico")
+        .expect("chart intent requires the chart token");
+    let by = tokens[chart_at + 1..]
+        .iter()
+        .position(|token| token.norm == "por")
+        .map(|position| position + chart_at + 1)
+        .ok_or_else(|| ParseError::Unsupported(
+            "use 'Crie um gráfico de barras de valor por produto', informando a coluna numérica e a coluna de categorias".into(),
+        ))?;
+    let value_tokens = &tokens[chart_at + 1..by];
+    let category_tokens = &tokens[by + 1..];
+    if value_tokens.is_empty() || category_tokens.is_empty() {
+        return Err(ParseError::Unsupported(
+            "informe uma coluna numérica antes de 'por' e uma coluna de categorias depois".into(),
+        ));
+    }
+    let x_column = resolve_chart_axis(category_tokens, table, chosen_column, false)?;
+    let y_column = resolve_chart_axis(value_tokens, table, chosen_column, true)?;
+    if x_column == y_column {
+        return Err(ParseError::InvalidValue(
+            "escolha colunas diferentes para os eixos X e Y".into(),
+        ));
+    }
+    if !is_numeric_kind(&table.columns[y_column].kind) {
+        return Err(ParseError::InvalidValue(format!(
+            "'{}' não é uma coluna numérica para o eixo Y",
+            table.columns[y_column].name
+        )));
+    }
+    let kind_words: Vec<&str> = value_tokens
+        .iter()
+        .filter_map(|token| match token.norm.as_str() {
+            "barra" | "barras" => Some("barras"),
+            "linha" | "linhas" => Some("linhas"),
+            _ => None,
+        })
+        .collect();
+    if kind_words.contains(&"barras") && kind_words.contains(&"linhas") {
+        return Err(ParseError::InvalidValue("escolha barras ou linhas".into()));
+    }
+    let kind = if kind_words.contains(&"linhas")
+        || kind_words.is_empty() && table.columns[x_column].kind == ColumnKind::Date
+    {
+        ChartKind::Line
+    } else {
+        ChartKind::Bar
+    };
+    let kind_name = if kind == ChartKind::Line {
+        "linhas"
+    } else {
+        "barras"
+    };
+    let x_name = &table.columns[x_column].name;
+    let y_name = &table.columns[y_column].name;
+    Ok(ParsedChart {
+        spec: ChartSpec {
+            kind,
+            x_column,
+            y_column,
+            title: format!("{y_name} por {x_name}"),
+        },
+        explanation: format!(
+            "Criar gráfico de {kind_name} com '{x_name}' no eixo X e '{y_name}' no eixo Y, usando os registros visíveis."
+        ),
+    })
+}
+
+fn resolve_chart_axis(
+    tokens: &[Token],
+    table: &Table,
+    chosen_column: Option<usize>,
+    skip_kind: bool,
+) -> Result<usize, ParseError> {
+    let column = resolve_column(tokens, table, chosen_column)?;
+    let phrase: Vec<&str> = tokens
+        .iter()
+        .map(|token| token.norm.as_str())
+        .filter(|word| {
+            !is_filler(word)
+                && (!skip_kind || !matches!(*word, "barra" | "barras" | "linha" | "linhas"))
+        })
+        .collect();
+    let name = normalize(&table.columns[column].name);
+    let name_words: Vec<&str> = name
+        .split_whitespace()
+        .filter(|word| !is_filler(word))
+        .collect();
+    let exact = phrase == name_words;
+    let alias = phrase.len() == 1
+        && name_words.iter().any(|word| {
+            phrase[0] == *word
+                || alias_class(phrase[0]).is_some() && alias_class(phrase[0]) == alias_class(word)
+        });
+    if !exact && !alias {
+        return Err(ParseError::Unsupported(
+            "informe uma única coluna por eixo, usando o nome da coluna".into(),
+        ));
+    }
+    Ok(column)
 }
 
 fn is_aggregate_intent(word: &str) -> bool {
@@ -1011,6 +1264,111 @@ mod tests {
         assert!(parse_command("Calcule valor por categoria", &table).is_err());
         assert!(parse_command("Some categoria por produto", &table).is_err());
         assert!(parse_command("Some valor por", &table).is_err());
+    }
+
+    #[test]
+    fn creates_bar_and_line_chart_specs_from_portuguese_commands() {
+        let table = products();
+        let ParsedCommand::Chart(bar) =
+            parse_command("Crie um gráfico de barras de valor por produto", &table).unwrap()
+        else {
+            panic!("esperado gráfico de barras");
+        };
+        assert_eq!(bar.spec.kind, ChartKind::Bar);
+        assert_eq!((bar.spec.x_column, bar.spec.y_column), (0, 1));
+        assert!(bar.explanation.contains("registros visíveis"));
+        let ParsedCommand::Chart(line) =
+            parse_command("Gere gráfico de linhas de quantidade por categoria", &table).unwrap()
+        else {
+            panic!("esperado gráfico de linhas");
+        };
+        assert_eq!(line.spec.kind, ChartKind::Line);
+        assert_eq!((line.spec.x_column, line.spec.y_column), (3, 2));
+        assert!(parse_command("Crie gráfico de categoria por produto", &table).is_err());
+        assert!(parse_command("Crie gráfico dos 10 produtos mais caros", &table).is_err());
+        assert!(parse_command("Crie gráfico de valor e quantidade por produto", &table).is_err());
+        let mut dates = Table::new("Receitas", vec!["Mês".into(), "Faturamento".into()]);
+        dates
+            .add_row(vec!["2026-10-01".into(), "100".into()])
+            .unwrap();
+        dates.infer_column_types();
+        let ParsedCommand::Chart(by_month) =
+            parse_command("Crie gráfico de faturamento por mês", &dates).unwrap()
+        else {
+            panic!("esperado gráfico por data");
+        };
+        assert_eq!(by_month.spec.kind, ChartKind::Line);
+        let mut ambiguous = Table::new(
+            "Preços",
+            vec!["Produto".into(), "Preço A".into(), "Preço B".into()],
+        );
+        ambiguous
+            .add_row(vec!["A".into(), "1".into(), "2".into()])
+            .unwrap();
+        ambiguous.infer_column_types();
+        let command = "Crie gráfico de valor por produto";
+        assert!(matches!(
+            parse_command(command, &ambiguous),
+            Err(ParseError::Ambiguous { .. })
+        ));
+        let ParsedCommand::Chart(chosen) =
+            parse_command_with_override(command, &ambiguous, Some(2)).unwrap()
+        else {
+            panic!("esperado gráfico com coluna escolhida");
+        };
+        assert_eq!(chosen.spec.y_column, 2);
+    }
+
+    #[test]
+    fn ranks_largest_smallest_and_sold_items_without_guessing() {
+        let table = products();
+        let ParsedCommand::Top(expensive) =
+            parse_command("Mostre os 2 produtos mais caros", &table).unwrap()
+        else {
+            panic!("esperado ranking por preço");
+        };
+        assert_eq!(expensive.count, 2);
+        assert_eq!(expensive.sort.column, 1);
+        assert_eq!(expensive.sort.direction, SortDirection::Descending);
+        let ParsedCommand::Top(cheap) =
+            parse_command("Mostre os 2 produtos mais baratos", &table).unwrap()
+        else {
+            panic!("esperado ranking crescente");
+        };
+        assert_eq!(cheap.sort.direction, SortDirection::Ascending);
+        assert!(parse_command("Mostre os 2 produtos mais vendidos", &table).is_err());
+        let mut sales = Table::new("Vendas", vec!["Produto".into(), "Unidades vendidas".into()]);
+        sales.add_row(vec!["A".into(), "12".into()]).unwrap();
+        sales.infer_column_types();
+        let ParsedCommand::Top(sold) =
+            parse_command("Mostre os 2 produtos mais vendidos", &sales).unwrap()
+        else {
+            panic!("esperado ranking por vendas");
+        };
+        assert_eq!(sold.sort.column, 1);
+        assert!(parse_command("Mostre os 0 produtos mais caros", &table).is_err());
+        assert!(parse_command("Mostre os 1,5 produtos mais caros", &table).is_err());
+        assert!(parse_command("Mostre produtos mais caros", &table).is_err());
+        assert!(parse_command("Mostre os 2 produtos mais caros e baratos", &table).is_err());
+        let mut ambiguous = Table::new(
+            "Preços",
+            vec!["Produto".into(), "Valor".into(), "Preço".into()],
+        );
+        ambiguous
+            .add_row(vec!["A".into(), "10".into(), "20".into()])
+            .unwrap();
+        ambiguous.infer_column_types();
+        let command = "Mostre 1 produto mais caro";
+        assert!(matches!(
+            parse_command(command, &ambiguous),
+            Err(ParseError::Ambiguous { .. })
+        ));
+        let ParsedCommand::Top(chosen) =
+            parse_command_with_override(command, &ambiguous, Some(2)).unwrap()
+        else {
+            panic!("esperado ranking com coluna escolhida");
+        };
+        assert_eq!(chosen.sort.column, 2);
     }
 
     #[test]

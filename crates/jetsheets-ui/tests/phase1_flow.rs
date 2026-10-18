@@ -116,6 +116,7 @@ fn phase1_csv_filter_results_chart_and_project_roundtrip() {
         table,
         filter: Some(changed_filter.expr),
         sort: None,
+        visible_limit: None,
         aggregate: None,
         chart: Some(chart),
         dashboard: DashboardSpec::default(),

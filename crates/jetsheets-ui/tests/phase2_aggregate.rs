@@ -90,6 +90,7 @@ fn filtered_grouped_sum_exports_and_reopens() {
         table,
         filter: Some(filter),
         sort: None,
+        visible_limit: None,
         aggregate: Some(command.spec),
         chart: None,
         dashboard: DashboardSpec::default(),
