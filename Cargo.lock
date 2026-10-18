@@ -875,10 +875,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "jetsheets-installer"
+name = "jetsheets-diagnostics"
 version = "0.1.0"
+
+[[package]]
+name = "jetsheets-installer"
+version = "0.1.2"
 dependencies = [
  "eframe",
+ "jetsheets-diagnostics",
  "rfd",
  "serde",
  "serde_json",
@@ -904,11 +909,12 @@ dependencies = [
 
 [[package]]
 name = "jetsheets-ui"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "eframe",
  "jetsheets-charts",
  "jetsheets-core",
+ "jetsheets-diagnostics",
  "jetsheets-language",
  "jetsheets-storage",
  "rfd",

@@ -88,4 +88,30 @@ mod tests {
         );
         std::fs::remove_dir_all(folder).unwrap();
     }
+
+    #[test]
+    #[ignore = "opens the installed Windows desktop application"]
+    fn installed_application_starts_on_windows() {
+        assert!(
+            available(),
+            "build the installer with JETSHEETS_BUNDLE_PATH"
+        );
+        let folder =
+            std::env::temp_dir().join(format!("jetsheets-launch-test-{}", std::process::id()));
+        install(&folder).unwrap();
+        let mut app = std::process::Command::new(folder.join(crate::release::EXECUTABLE_NAME))
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let status = app.try_wait().unwrap();
+        if status.is_none() {
+            app.kill().unwrap();
+            app.wait().unwrap();
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+        assert!(
+            status.is_none(),
+            "installed application exited immediately: {status:?}"
+        );
+    }
 }

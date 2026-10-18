@@ -1,6 +1,6 @@
 [package]
 name = "jetsheets-ui"
-version = "0.1.0"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,3 +12,4 @@ jetsheets-core = { path = "../jetsheets-core" }
 jetsheets-language = { path = "../jetsheets-language" }
 jetsheets-storage = { path = "../jetsheets-storage" }
 jetsheets-charts = { path = "../jetsheets-charts" }
+jetsheets-diagnostics = { path = "../jetsheets-diagnostics" }

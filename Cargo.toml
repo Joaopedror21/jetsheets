@@ -6,6 +6,7 @@ members = [
     "crates/jetsheets-charts",
     "crates/jetsheets-ui",
     "crates/jetsheets-installer",
+    "crates/jetsheets-diagnostics",
 ]
 resolver = "2"
 

@@ -46,16 +46,29 @@ jobs:
         env:
           JETSHEETS_BUNDLE_PATH: ${{ github.workspace }}\target\release\jetsheets-ui.exe
         run: cargo build --release --locked -p jetsheets-installer
+      - name: Verify GUI subsystem
+        shell: pwsh
+        run: |
+          foreach ($path in @('target/release/jetsheets-ui.exe', 'target/release/jetsheets-installer.exe')) {
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $path).Path)
+            $pe = [System.BitConverter]::ToInt32($bytes, 0x3c)
+            $signature = [System.BitConverter]::ToUInt32($bytes, $pe)
+            $subsystem = [System.BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
+            if ($signature -ne 0x00004550 -or $subsystem -ne 2) {
+              throw "$path não é um executável Windows GUI (subsystem=$subsystem)."
+            }
+          }
       - name: Prepare downloads
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item target/release/jetsheets-ui.exe dist/JetSheets-windows-x86_64.exe
           Copy-Item target/release/jetsheets-installer.exe dist/JetSheets-Installer-windows-x86_64.exe
+          Copy-Item target/release/jetsheets-installer.exe dist/JetSheets-Setup.exe
       - name: Publish GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create $env:RELEASE_TAG dist/JetSheets-windows-x86_64.exe dist/JetSheets-Installer-windows-x86_64.exe --verify-tag --generate-notes --latest
+          gh release create $env:RELEASE_TAG dist/JetSheets-windows-x86_64.exe dist/JetSheets-Installer-windows-x86_64.exe dist/JetSheets-Setup.exe --verify-tag --generate-notes --latest
