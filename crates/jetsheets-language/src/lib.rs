@@ -2,8 +2,8 @@
 //! expression; the data engine owns execution and result statistics.
 
 use jetsheets_core::{
-    ColumnKind, Condition, FilterExpr, FilterValue, Operator, SortDirection, SortSpec, Table,
-    parse_br_number,
+    AggregateOperation, AggregateSpec, ColumnKind, Condition, FilterExpr, FilterValue, Operator,
+    SortDirection, SortSpec, Table, parse_br_number,
 };
 use std::fmt;
 
@@ -21,9 +21,16 @@ pub struct ParsedSort {
 }
 
 #[derive(Debug, Clone)]
+pub struct ParsedAggregate {
+    pub spec: AggregateSpec,
+    pub explanation: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum ParsedCommand {
     Filter(ParsedFilter),
     Sort(ParsedSort),
+    Aggregate(ParsedAggregate),
 }
 
 impl ParsedCommand {
@@ -31,6 +38,7 @@ impl ParsedCommand {
         match self {
             Self::Filter(parsed) => &parsed.explanation,
             Self::Sort(parsed) => &parsed.explanation,
+            Self::Aggregate(parsed) => &parsed.explanation,
         }
     }
 }
@@ -50,9 +58,76 @@ pub fn parse_command_with_override(
         .is_some_and(|token| is_sort_intent(&token.norm))
     {
         parse_sort(&tokens, table, chosen_column).map(ParsedCommand::Sort)
+    } else if tokens
+        .first()
+        .is_some_and(|token| is_aggregate_intent(&token.norm))
+    {
+        parse_aggregate(&tokens, table, chosen_column).map(ParsedCommand::Aggregate)
     } else {
         parse_filter_with_override(command, table, chosen_column).map(ParsedCommand::Filter)
     }
+}
+
+fn is_aggregate_intent(word: &str) -> bool {
+    matches!(
+        word,
+        "agrupe" | "agrupar" | "conte" | "contar" | "some" | "somar"
+    )
+}
+
+fn parse_aggregate(
+    tokens: &[Token],
+    table: &Table,
+    chosen_column: Option<usize>,
+) -> Result<ParsedAggregate, ParseError> {
+    let by = tokens
+        .iter()
+        .position(|token| token.norm == "por")
+        .ok_or_else(|| {
+            ParseError::Unsupported("informe a coluna de agrupamento após 'por'".into())
+        })?;
+    let group_tokens = &tokens[by + 1..];
+    if group_tokens.is_empty() {
+        return Err(ParseError::Unsupported(
+            "informe a coluna de agrupamento após 'por'".into(),
+        ));
+    }
+    let group_column = resolve_column(group_tokens, table, chosen_column)?;
+    let operation = if matches!(tokens[0].norm.as_str(), "some" | "somar") {
+        let value_tokens = &tokens[1..by];
+        if value_tokens.is_empty() {
+            return Err(ParseError::Unsupported(
+                "informe a coluna numérica antes de 'por'".into(),
+            ));
+        }
+        let value_column = resolve_column(value_tokens, table, chosen_column)?;
+        if !is_numeric_kind(&table.columns[value_column].kind) {
+            return Err(ParseError::InvalidValue(format!(
+                "'{}' não é uma coluna numérica",
+                table.columns[value_column].name
+            )));
+        }
+        AggregateOperation::Sum { value_column }
+    } else {
+        AggregateOperation::Count
+    };
+    let explanation = match operation {
+        AggregateOperation::Count => format!(
+            "Contar registros por '{}'.",
+            table.columns[group_column].name
+        ),
+        AggregateOperation::Sum { value_column } => format!(
+            "Somar '{}' por '{}'.",
+            table.columns[value_column].name, table.columns[group_column].name
+        ),
+    };
+    Ok(ParsedAggregate {
+        spec: AggregateSpec {
+            group_column,
+            operation,
+        },
+        explanation,
+    })
 }
 
 fn is_sort_intent(word: &str) -> bool {
@@ -866,6 +941,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn parses_group_counts_and_sums_without_guessing_columns() {
+        let table = products();
+        let ParsedCommand::Aggregate(count) =
+            parse_command("Agrupe os produtos por categoria", &table).unwrap()
+        else {
+            panic!("esperado agrupamento");
+        };
+        assert_eq!(count.spec.group_column, 3);
+        assert_eq!(count.spec.operation, AggregateOperation::Count);
+        let ParsedCommand::Aggregate(sum) =
+            parse_command("Some valor por categoria", &table).unwrap()
+        else {
+            panic!("esperada soma");
+        };
+        assert_eq!(
+            sum.spec.operation,
+            AggregateOperation::Sum { value_column: 1 }
+        );
+        assert_eq!(sum.spec.group_column, 3);
+        assert!(parse_command("Some categoria por produto", &table).is_err());
+        assert!(parse_command("Some valor por", &table).is_err());
     }
 
     #[test]

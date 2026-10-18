@@ -7,11 +7,14 @@ use eframe::egui::{
 };
 use jetsheets_charts::{ChartKind, ChartPoint, ChartSpec, prepare_chart};
 use jetsheets_core::{
-    ColumnKind, FilterExpr, FilterSummary, FilterValue, Operator, SortDirection, SortSpec, Table,
-    evaluate_filter, sort_rows, summarize,
+    AggregateOperation, AggregateSpec, ColumnKind, FilterExpr, FilterSummary, FilterValue,
+    GroupResult, Operator, SortDirection, SortSpec, Table, aggregate_rows, evaluate_filter,
+    sort_rows, summarize,
 };
 use jetsheets_language::{ParseError, ParsedCommand, parse_command, parse_command_with_override};
-use jetsheets_storage::{Project, export_csv_view, import_csv, load_project, save_project};
+use jetsheets_storage::{
+    Project, export_aggregate_csv, export_csv_view, import_csv, load_project, save_project,
+};
 
 use crate::{
     chart_view,
@@ -44,6 +47,10 @@ enum TaskOutcome {
         rows: usize,
         result: Result<(), String>,
     },
+    ExportedGroups {
+        path: PathBuf,
+        result: Result<usize, String>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -64,6 +71,7 @@ enum ClipboardAction {
 struct ViewState {
     filter: Option<FilterExpr>,
     sort: Option<SortSpec>,
+    aggregate: Option<AggregateSpec>,
 }
 
 pub struct JetSheetsApp {
@@ -87,6 +95,7 @@ pub struct JetSheetsApp {
     chart_draft: Option<ChartSpec>,
     chart_page: usize,
     chart_data: Option<Result<Vec<ChartPoint>, String>>,
+    aggregate_data: Option<Result<Vec<GroupResult>, String>>,
     column_widths: Vec<f32>,
     status: String,
     worker: Option<Receiver<TaskOutcome>>,
@@ -112,6 +121,7 @@ impl JetSheetsApp {
             ),
             filter: None,
             sort: None,
+            aggregate: None,
             chart: None,
         };
         let mut app = Self {
@@ -140,6 +150,7 @@ impl JetSheetsApp {
             chart_draft: None,
             chart_page: 0,
             chart_data: None,
+            aggregate_data: None,
             column_widths: Vec::new(),
             status: "Adicione linhas ou importe um arquivo CSV para começar.".into(),
             worker: None,
@@ -189,6 +200,11 @@ impl JetSheetsApp {
             .chart
             .as_ref()
             .map(|spec| prepare_chart(&self.project.table, &self.visible_rows, spec));
+        self.aggregate_data = self
+            .project
+            .aggregate
+            .as_ref()
+            .map(|spec| aggregate_rows(&self.project.table, &self.visible_rows, spec));
         self.pending_cell_refresh = false;
         if self
             .selected_row
@@ -226,6 +242,7 @@ impl JetSheetsApp {
         self.chart_draft = None;
         self.chart_page = 0;
         self.chart_data = None;
+        self.aggregate_data = None;
         self.column_widths.clear();
         self.document_id = self.document_id.wrapping_add(1);
         self.revision = 0;
@@ -245,6 +262,7 @@ impl JetSheetsApp {
                 ),
                 filter: None,
                 sort: None,
+                aggregate: None,
                 chart: None,
             },
             None,
@@ -390,6 +408,42 @@ impl JetSheetsApp {
         self.status = "Exportando resultados CSV...".into();
     }
 
+    fn export_groups(&mut self, ctx: &egui::Context) {
+        if self.worker.is_some() {
+            self.status = "Aguarde a operação de arquivo em andamento.".into();
+            return;
+        }
+        if self.pending_cell_refresh {
+            self.refresh();
+        }
+        let Some(spec) = self.project.aggregate else {
+            return;
+        };
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("Arquivo CSV", &["csv"])
+            .set_file_name("agrupamento.csv")
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("csv");
+        }
+        let table = self.project.table.clone();
+        let visible_rows = self.visible_rows.clone();
+        let task_path = path.clone();
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = export_aggregate_csv(&task_path, &table, &visible_rows, &spec)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(TaskOutcome::ExportedGroups { path, result });
+            repaint.request_repaint();
+        });
+        self.worker = Some(receiver);
+        self.status = "Exportando agrupamento CSV...".into();
+    }
+
     fn poll_worker(&mut self, ctx: &egui::Context) {
         let result = match self.worker.as_ref().map(Receiver::try_recv) {
             Some(Ok(result)) => result,
@@ -412,6 +466,7 @@ impl JetSheetsApp {
                         table,
                         filter: None,
                         sort: None,
+                        aggregate: None,
                         chart: None,
                     },
                     None,
@@ -484,6 +539,17 @@ impl JetSheetsApp {
             } => {
                 self.status = format!("Falha ao exportar: {error}");
             }
+            TaskOutcome::ExportedGroups {
+                path,
+                result: Ok(groups),
+            } => {
+                self.status = format!("{groups} grupos exportados para {}.", path.display());
+            }
+            TaskOutcome::ExportedGroups {
+                result: Err(error), ..
+            } => {
+                self.status = format!("Falha ao exportar agrupamento: {error}");
+            }
         }
     }
 
@@ -516,41 +582,42 @@ impl JetSheetsApp {
             ParsedCommand::Sort(parsed) => {
                 sort_rows(&self.project.table, &[], &parsed.spec).map(|_| ())
             }
+            ParsedCommand::Aggregate(parsed) => {
+                aggregate_rows(&self.project.table, &self.visible_rows, &parsed.spec).map(|_| ())
+            }
         };
         if let Err(error) = validation {
             self.status = format!("Prévia desatualizada: {error}. Interprete o comando novamente.");
             return;
         }
         self.push_view_history();
-        let is_filter = match parsed {
+        let operation = match parsed {
             ParsedCommand::Filter(parsed) => {
                 self.project.filter = Some(parsed.expr);
-                true
+                "Filtro"
             }
             ParsedCommand::Sort(parsed) => {
                 self.project.sort = Some(parsed.spec);
-                false
+                "Ordenação"
+            }
+            ParsedCommand::Aggregate(parsed) => {
+                self.project.aggregate = Some(parsed.spec);
+                "Agrupamento"
             }
         };
         self.command_history.push(self.command.clone());
         self.changed();
-        self.status = if is_filter {
-            format!(
-                "Filtro aplicado: {} linhas encontradas.",
-                self.visible_rows.len()
-            )
-        } else {
-            format!(
-                "Ordenação aplicada a {} linhas visíveis.",
-                self.visible_rows.len()
-            )
-        };
+        self.status = format!(
+            "{operation} aplicado a {} linhas visíveis.",
+            self.visible_rows.len()
+        );
     }
 
     fn view_state(&self) -> ViewState {
         ViewState {
             filter: self.project.filter.clone(),
             sort: self.project.sort,
+            aggregate: self.project.aggregate,
         }
     }
 
@@ -583,11 +650,22 @@ impl JetSheetsApp {
         self.status = "Filtro removido.".into();
     }
 
+    fn clear_aggregate(&mut self) {
+        if self.project.aggregate.is_none() {
+            return;
+        }
+        self.push_view_history();
+        self.project.aggregate = None;
+        self.changed();
+        self.status = "Agrupamento removido.".into();
+    }
+
     fn undo_view(&mut self) {
         if let Some(previous) = self.undo.pop() {
             self.redo.push(self.view_state());
             self.project.filter = previous.filter;
             self.project.sort = previous.sort;
+            self.project.aggregate = previous.aggregate;
             self.changed();
             self.status = "Operação desfeita.".into();
         }
@@ -598,6 +676,7 @@ impl JetSheetsApp {
             self.undo.push(self.view_state());
             self.project.filter = next.filter;
             self.project.sort = next.sort;
+            self.project.aggregate = next.aggregate;
             self.changed();
             self.status = "Operação refeita.".into();
         }
@@ -726,7 +805,7 @@ impl JetSheetsApp {
             .show(root, |ui| {
                 ui.add_space(10.0);
                 ui.heading("Comandos em português");
-                ui.label("Descreva um filtro ou uma ordenação usando os nomes das colunas.");
+                ui.label("Descreva um filtro, ordenação ou agrupamento usando os nomes das colunas.");
                 ui.add_space(8.0);
                 let input = ui.add(
                     TextEdit::multiline(&mut self.command)
@@ -748,6 +827,7 @@ impl JetSheetsApp {
                     let action = match preview {
                         ParsedCommand::Filter(_) => "Aplicar filtro",
                         ParsedCommand::Sort(_) => "Aplicar ordenação",
+                        ParsedCommand::Aggregate(_) => "Criar agrupamento",
                     };
                     if theme::primary_button(ui, action, colors).clicked() {
                         self.apply_preview();
@@ -787,7 +867,9 @@ impl JetSheetsApp {
                     ui.label("• quantidade pelo menos 4 mil e valor até 10.000");
                     ui.label("• categoria contém frutas ou preço entre 100 e 500");
                     ui.label("• ordene por valor decrescente");
-                    ui.label("Filtros usam E/OU. Agrupamentos, somas por categoria e comandos de gráfico serão adicionados em fases futuras.");
+                    ui.label("• agrupe por categoria");
+                    ui.label("• some valor por categoria");
+                    ui.label("Filtros usam E/OU. Médias por grupo e comandos de gráfico ainda não estão disponíveis.");
                 });
                 ui.collapsing("Comandos aplicados nesta sessão", |ui| {
                     for command in self.command_history.iter().rev() {
@@ -839,6 +921,7 @@ impl JetSheetsApp {
                 else {
                     self.project.filter = None;
                     self.project.sort = None;
+                    self.project.aggregate = None;
                     self.project.chart = None;
                     self.undo.clear();
                     self.redo.clear();
@@ -847,7 +930,7 @@ impl JetSheetsApp {
                     self.selection = None;
                     self.focused_cell_id = None;
                     self.changed();
-                    self.status = "Coluna excluída; filtro e gráfico foram limpos para evitar referências inválidas.".into();
+                    self.status = "Coluna excluída; filtro, ordenação, agrupamento e gráfico foram limpos para evitar referências inválidas.".into();
                 }
             }
         });
@@ -1313,6 +1396,72 @@ impl JetSheetsApp {
                     }
                 });
         }
+        if let Some(spec) = self.project.aggregate {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.strong("Agrupamento");
+                if ui.button("Exportar agrupamento CSV").clicked() {
+                    self.export_groups(&ctx);
+                }
+                if ui.button("Remover agrupamento").clicked() {
+                    self.clear_aggregate();
+                }
+            });
+            if let Some(data) = &self.aggregate_data {
+                match data {
+                    Ok(groups) => {
+                        let group_name = &self.project.table.columns[spec.group_column].name;
+                        ui.label(format!(
+                            "{group_name} · {} grupos · {} linhas visíveis",
+                            groups.len(),
+                            self.visible_rows.len()
+                        ));
+                        let is_sum = matches!(spec.operation, AggregateOperation::Sum { .. });
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [190.0, 23.0],
+                                egui::Label::new(RichText::new("Grupo").strong()),
+                            );
+                            ui.add_sized(
+                                [85.0, 23.0],
+                                egui::Label::new(RichText::new("Registros").strong()),
+                            );
+                            if is_sum {
+                                ui.add_sized(
+                                    [110.0, 23.0],
+                                    egui::Label::new(RichText::new("Válidos").strong()),
+                                );
+                                ui.strong("Soma");
+                            }
+                        });
+                        ScrollArea::vertical()
+                            .id_salt("aggregate_rows")
+                            .max_height(260.0)
+                            .show_rows(ui, 26.0, groups.len(), |ui, range| {
+                                for index in range {
+                                    let group = &groups[index];
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized([190.0, 23.0], egui::Label::new(&group.label))
+                                            .on_hover_text(&group.label);
+                                        ui.add_sized(
+                                            [85.0, 23.0],
+                                            egui::Label::new(group.count.to_string()),
+                                        );
+                                        if is_sum {
+                                            ui.add_sized(
+                                                [110.0, 23.0],
+                                                egui::Label::new(group.valid_values.to_string()),
+                                            );
+                                            ui.label(format_number(group.total));
+                                        }
+                                    });
+                                }
+                            });
+                    }
+                    Err(error) => theme::error_message(ui, error, colors),
+                }
+            }
+        }
         ui.separator();
         theme::card(ui, colors, |ui| self.chart_section(ui));
     }
@@ -1628,6 +1777,39 @@ fn describe_filter(expr: &FilterExpr, table: &Table) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouping_updates_when_filter_changes_and_can_be_undone() {
+        let ctx = egui::Context::default();
+        let mut app = JetSheetsApp::new(&ctx);
+        for row in [["A", "100", "1"], ["B", "200", "2"], ["A", "300", "3"]] {
+            app.project
+                .table
+                .add_row(row.map(str::to_owned).to_vec())
+                .unwrap();
+        }
+        app.refresh();
+        app.command = "Some valor por produto".into();
+        app.interpret();
+        assert!(matches!(app.preview, Some(ParsedCommand::Aggregate(_))));
+        app.apply_preview();
+        let groups = app.aggregate_data.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].total, 400.0);
+        app.command = "valor acima de 150".into();
+        app.interpret();
+        app.apply_preview();
+        let groups = app.aggregate_data.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(groups[0].label, "B");
+        assert_eq!(groups[1].total, 300.0);
+        app.undo_view();
+        assert_eq!(
+            app.aggregate_data.as_ref().unwrap().as_ref().unwrap()[0].total,
+            400.0
+        );
+        app.undo_view();
+        assert!(app.project.aggregate.is_none());
+    }
 
     #[test]
     fn portuguese_sort_changes_view_and_can_be_undone() {

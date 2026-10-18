@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// A named table with a rectangular set of rows.
@@ -244,6 +245,104 @@ pub struct SortSpec {
 pub enum SortDirection {
     Ascending,
     Descending,
+}
+
+/// One grouped analysis over the currently visible rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateSpec {
+    pub group_column: usize,
+    pub operation: AggregateOperation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AggregateOperation {
+    Count,
+    Sum { value_column: usize },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupResult {
+    pub label: String,
+    pub count: usize,
+    pub valid_values: usize,
+    pub total: f64,
+}
+
+/// Groups visible rows in their first-seen order. Blank numeric cells do not
+/// contribute to totals; malformed nonblank values are reported explicitly.
+pub fn aggregate_rows(
+    table: &Table,
+    row_indices: &[usize],
+    spec: &AggregateSpec,
+) -> Result<Vec<GroupResult>, String> {
+    if spec.group_column >= table.column_count() {
+        return Err("A coluna de agrupamento não existe.".into());
+    }
+    if let AggregateOperation::Sum { value_column } = spec.operation {
+        let column = table
+            .columns
+            .get(value_column)
+            .ok_or("A coluna de soma não existe.")?;
+        if !matches!(
+            column.kind,
+            ColumnKind::Number | ColumnKind::Currency | ColumnKind::Percentage
+        ) {
+            return Err(format!(
+                "'{}' não é uma coluna numérica para somar.",
+                column.name
+            ));
+        }
+    }
+    let mut groups = Vec::<GroupResult>::new();
+    let mut positions = HashMap::<String, usize>::new();
+    for &row_index in row_indices {
+        let row = table
+            .rows
+            .get(row_index)
+            .ok_or_else(|| format!("Linha {row_index} inexistente no agrupamento."))?;
+        let label = row
+            .get(spec.group_column)
+            .ok_or_else(|| format!("Linha {row_index} incompleta no agrupamento."))?
+            .trim();
+        let key = fold_text(label);
+        let index = *positions.entry(key).or_insert_with(|| {
+            let index = groups.len();
+            groups.push(GroupResult {
+                label: if label.is_empty() {
+                    "(vazio)".into()
+                } else {
+                    label.to_owned()
+                },
+                count: 0,
+                valid_values: 0,
+                total: 0.0,
+            });
+            index
+        });
+        let group = &mut groups[index];
+        group.count += 1;
+        if let AggregateOperation::Sum { value_column } = spec.operation {
+            let value = row
+                .get(value_column)
+                .ok_or_else(|| format!("Linha {row_index} incompleta no agrupamento."))?
+                .trim();
+            if !value.is_empty() {
+                let number = parse_br_number(value).ok_or_else(|| {
+                    format!(
+                        "Valor '{}' inválido na linha {} para soma.",
+                        value,
+                        row_index + 1
+                    )
+                })?;
+                group.total += number;
+                if !group.total.is_finite() {
+                    return Err("A soma excede o intervalo numérico permitido.".into());
+                }
+                group.valid_values += 1;
+            }
+        }
+    }
+    Ok(groups)
 }
 
 pub fn sort_rows(
@@ -841,5 +940,39 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn groups_only_visible_rows_and_sums_valid_values() {
+        let mut table = Table::new("Vendas", vec!["Categoria".into(), "Valor".into()]);
+        for row in [
+            ["Livros", "1.000,50"],
+            ["Eletrônicos", "20"],
+            ["livros", ""],
+            ["Livros", "2"],
+        ] {
+            table.add_row(row.map(str::to_owned).to_vec()).unwrap();
+        }
+        table.infer_column_types();
+        let spec = AggregateSpec {
+            group_column: 0,
+            operation: AggregateOperation::Sum { value_column: 1 },
+        };
+        let groups = aggregate_rows(&table, &[0, 2, 3], &spec).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "Livros");
+        assert_eq!(groups[0].count, 3);
+        assert_eq!(groups[0].valid_values, 2);
+        assert_eq!(groups[0].total, 1002.5);
+        assert_eq!(table.rows[0][1], "1.000,50");
+        let count = AggregateSpec {
+            group_column: 0,
+            operation: AggregateOperation::Count,
+        };
+        assert_eq!(
+            aggregate_rows(&table, &[1, 0], &count).unwrap()[0].label,
+            "Eletrônicos"
+        );
+        assert!(aggregate_rows(&table, &[9], &count).is_err());
     }
 }

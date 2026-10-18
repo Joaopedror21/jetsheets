@@ -1,7 +1,10 @@
 //! Local CSV import and versioned JetSheets project files.
 
 use jetsheets_charts::ChartSpec;
-use jetsheets_core::{FilterExpr, SortSpec, Table, evaluate_filter, sort_rows};
+use jetsheets_core::{
+    AggregateOperation, AggregateSpec, FilterExpr, SortSpec, Table, aggregate_rows,
+    evaluate_filter, sort_rows,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -19,6 +22,8 @@ pub struct Project {
     pub filter: Option<FilterExpr>,
     #[serde(default)]
     pub sort: Option<SortSpec>,
+    #[serde(default)]
+    pub aggregate: Option<AggregateSpec>,
     pub chart: Option<ChartSpec>,
 }
 
@@ -157,6 +162,46 @@ pub fn export_csv_view(
     Ok(())
 }
 
+/// Export grouped results as UTF-8 CSV in the same order displayed by the UI.
+pub fn export_aggregate_csv(
+    path: impl AsRef<Path>,
+    table: &Table,
+    row_indices: &[usize],
+    spec: &AggregateSpec,
+) -> Result<usize, StorageError> {
+    let groups = aggregate_rows(table, row_indices, spec).map_err(StorageError::Csv)?;
+    let path = path.as_ref();
+    let (temp_path, mut temp) = create_sibling_temp(path)?;
+    let write_result = (|| -> Result<(), StorageError> {
+        temp.write_all(b"\xef\xbb\xbf")?;
+        let mut header = vec![table.columns[spec.group_column].name.as_str(), "Registros"];
+        if matches!(spec.operation, AggregateOperation::Sum { .. }) {
+            header.extend(["Valores válidos", "Soma"]);
+        }
+        write_csv_record(&mut temp, header)?;
+        for group in &groups {
+            let mut values = vec![group.label.clone(), group.count.to_string()];
+            if matches!(spec.operation, AggregateOperation::Sum { .. }) {
+                values.push(group.valid_values.to_string());
+                values.push(group.total.to_string().replace('.', ","));
+            }
+            write_csv_record(&mut temp, values.iter().map(String::as_str))?;
+        }
+        temp.sync_all()?;
+        Ok(())
+    })();
+    drop(temp);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(StorageError::Io(error));
+    }
+    Ok(groups.len())
+}
+
 fn write_csv_record<'a>(
     writer: &mut impl Write,
     values: impl IntoIterator<Item = &'a str>,
@@ -256,6 +301,11 @@ fn validate_project(project: &Project) -> Result<(), StorageError> {
     if let Some(sort) = &project.sort {
         sort_rows(&project.table, &[], sort)
             .map_err(|error| StorageError::Project(format!("Ordenação salva inválida: {error}")))?;
+    }
+    if let Some(aggregate) = &project.aggregate {
+        aggregate_rows(&project.table, &[], aggregate).map_err(|error| {
+            StorageError::Project(format!("Agrupamento salvo inválido: {error}"))
+        })?;
     }
     if let Some(spec) = &project.chart {
         spec.validate(&project.table)
@@ -490,6 +540,27 @@ mod tests {
     }
 
     #[test]
+    fn exports_grouped_sum_as_brazilian_csv() {
+        let path = test_path("csv");
+        let mut table = Table::new("Vendas", vec!["Categoria".into(), "Valor".into()]);
+        for row in [["A", "1.000,50"], ["B", "20"], ["A", "2"]] {
+            table.add_row(row.map(str::to_owned).to_vec()).unwrap();
+        }
+        table.infer_column_types();
+        let spec = AggregateSpec {
+            group_column: 0,
+            operation: AggregateOperation::Sum { value_column: 1 },
+        };
+        assert_eq!(
+            export_aggregate_csv(&path, &table, &[2, 0], &spec).unwrap(),
+            1
+        );
+        let exported = import_csv(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        assert_eq!(exported.rows, vec![vec!["A", "2", "2", "1002,5"]]);
+    }
+
+    #[test]
     fn rejects_unclosed_quotes() {
         assert!(parse_csv_records("A,B\n\"x,y", ',').is_err());
     }
@@ -506,6 +577,10 @@ mod tests {
                 column: 1,
                 direction: jetsheets_core::SortDirection::Descending,
             }),
+            aggregate: Some(AggregateSpec {
+                group_column: 0,
+                operation: jetsheets_core::AggregateOperation::Count,
+            }),
             chart: Some(ChartSpec {
                 kind: jetsheets_charts::ChartKind::Bar,
                 x_column: 0,
@@ -519,6 +594,7 @@ mod tests {
         fs::remove_file(path).unwrap();
         assert_eq!(loaded.table.rows, project.table.rows);
         assert_eq!(loaded.sort, project.sort);
+        assert_eq!(loaded.aggregate, project.aggregate);
         assert_eq!(loaded.chart.unwrap().title, "Valores");
     }
 
@@ -529,14 +605,17 @@ mod tests {
             table: Table::blank(),
             filter: None,
             sort: None,
+            aggregate: None,
             chart: None,
         };
         save_project(&path, &project).unwrap();
         let mut json: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         json["project"].as_object_mut().unwrap().remove("sort");
+        json["project"].as_object_mut().unwrap().remove("aggregate");
         fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(load_project(&path).unwrap().sort, None);
+        assert_eq!(load_project(&path).unwrap().aggregate, None);
         fs::remove_file(path).unwrap();
     }
 
@@ -547,6 +626,7 @@ mod tests {
             table: Table::blank(),
             filter: None,
             sort: None,
+            aggregate: None,
             chart: None,
         };
         save_project(&path, &project).unwrap();
@@ -574,6 +654,7 @@ mod tests {
                 value: jetsheets_core::FilterValue::Number(10.0),
             })),
             sort: None,
+            aggregate: None,
             chart: None,
         };
         assert!(

@@ -24,8 +24,10 @@ O projeto contém uma tabela, o filtro confirmado, a ordenação e a configuraç
 
 A ordenação por coluna é aplicada sobre os índices das linhas visíveis, sem reorganizar os dados de origem. Números brasileiros e datas são comparados pelos seus valores, texto ignora diferenças de maiúsculas e acentos e células vazias ficam no fim em ambas as direções. O comando em português e o seletor de resultados usam a mesma operação. O campo opcional `sort` no projeto mantém compatibilidade de leitura com arquivos `.jetsheet` anteriores.
 
+Agrupamentos de contagem e soma operam sobre os mesmos índices visíveis, preservando a primeira ordem encontrada e somando apenas células numéricas preenchidas. A tabela agrupada é recalculada após alterações nos dados ou filtros, permite exportação CSV e guarda a especificação no campo opcional `aggregate` do projeto. Arquivos de projeto antigos continuam legíveis.
+
 O instalador/atualizador é um crate Rust separado para Windows. Ele não altera o formato `.jetsheet`. O fluxo de download, verificação e recuperação é descrito em [INSTALLER.md](INSTALLER.md).
 
 ## Limite da Fase 1
 
-O interpretador executa filtros e comparações de valores; agrupamentos, agregações em linguagem natural, XLSX, fórmulas, dashboards e outros tipos de gráficos pertencem a fases posteriores. O arquivo `.jetsheet` usa JSON estruturado e versionado nesta primeira fase. Compactação e recursos avançados de recuperação ficam para uma evolução do formato.
+O interpretador executa filtros, ordenação e agrupamentos de contagem ou soma em português. XLSX, fórmulas, dashboards e outros tipos de gráficos pertencem a fases posteriores. O arquivo `.jetsheet` usa JSON estruturado e versionado. Compactação e recursos avançados de recuperação ficam para uma evolução do formato.

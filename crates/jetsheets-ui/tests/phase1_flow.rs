@@ -116,6 +116,7 @@ fn phase1_csv_filter_results_chart_and_project_roundtrip() {
         table,
         filter: Some(changed_filter.expr),
         sort: None,
+        aggregate: None,
         chart: Some(chart),
     };
     save_project(&paths.project, &project).unwrap();
