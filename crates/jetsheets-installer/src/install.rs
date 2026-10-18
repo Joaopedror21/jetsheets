@@ -132,6 +132,26 @@ pub fn installed(folder: &Path) -> Result<Option<InstallRecord>, String> {
     }
 }
 
+/// Removes only the verified application and its install record, preserving user files.
+pub fn uninstall(folder: &Path) -> Result<(), String> {
+    let Some(record) = installed(folder)? else {
+        return Err("Não há uma instalação do JetSheets nesta pasta.".into());
+    };
+    let executable = folder.join(EXECUTABLE_NAME);
+    let digest = sha256_file(&executable)?;
+    if !digest.eq_ignore_ascii_case(&record.sha256) {
+        return Err(
+            "O executável foi modificado. Desinstalação recusada para preservar o arquivo.".into(),
+        );
+    }
+    fs::remove_file(&executable)
+        .map_err(|error| format!("Feche o JetSheets antes de desinstalar: {error}"))?;
+    fs::remove_file(folder.join(RECORD_NAME)).map_err(|error| {
+        format!("O aplicativo foi removido, mas não foi possível apagar o registro: {error}")
+    })?;
+    Ok(())
+}
+
 /// Installs only a fully verified file, with a recoverable same-folder swap.
 pub fn install_verified(folder: &Path, part: &Path, release: &Release) -> Result<(), String> {
     fs::create_dir_all(folder).map_err(|error| error.to_string())?;
@@ -230,6 +250,62 @@ mod tests {
         let downgrade = folder.join("downgrade.part");
         fs::write(&downgrade, b"first").unwrap();
         assert!(install_verified(&folder, &downgrade, &first).is_err());
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn uninstall_removes_only_verified_application_files() {
+        let folder = std::env::temp_dir().join(format!(
+            "jetsheets-uninstall-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&folder).unwrap();
+        let project = folder.join("meu-projeto.jetsheet");
+        fs::write(&project, b"user data").unwrap();
+        let part = folder.join("download.part");
+        fs::write(&part, b"app data").unwrap();
+        let release = Release {
+            tag: "v1.0.0".into(),
+            version: Version(1, 0, 0),
+            notes: String::new(),
+            page_url: String::new(),
+            download_url: String::new(),
+            size: 8,
+            sha256: sha256_file(&part).unwrap(),
+        };
+        install_verified(&folder, &part, &release).unwrap();
+        uninstall(&folder).unwrap();
+        assert!(installed(&folder).unwrap().is_none());
+        assert_eq!(fs::read(&project).unwrap(), b"user data");
+        assert!(folder.exists());
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn uninstall_refuses_a_modified_executable() {
+        let folder = std::env::temp_dir().join(format!(
+            "jetsheets-uninstall-modified-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&folder).unwrap();
+        let part = folder.join("download.part");
+        fs::write(&part, b"app data").unwrap();
+        let release = Release {
+            tag: "v1.0.0".into(),
+            version: Version(1, 0, 0),
+            notes: String::new(),
+            page_url: String::new(),
+            download_url: String::new(),
+            size: 8,
+            sha256: sha256_file(&part).unwrap(),
+        };
+        install_verified(&folder, &part, &release).unwrap();
+        fs::write(folder.join(EXECUTABLE_NAME), b"changed").unwrap();
+        assert!(uninstall(&folder).is_err());
+        assert!(folder.join(EXECUTABLE_NAME).exists());
+        assert!(folder.join(RECORD_NAME).exists());
         fs::remove_dir_all(folder).unwrap();
     }
 }

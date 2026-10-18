@@ -10,15 +10,17 @@ O ativo esperado chama-se `JetSheets-windows-x86_64.exe`. O instalador exige HTT
 
 Depois de conferir tamanho e SHA-256, o instalador grava um novo registro e move o executável anterior para `.jetsheets-rollback.exe` antes de ativar o novo. Um início posterior recupera a versão anterior se encontrar uma troca incompleta. Ele recusa downgrade e recusa uma Release que reuse a mesma tag com um digest diferente. O usuário deve fechar o aplicativo antes da troca do executável. O arquivo de projeto não faz parte da atualização.
 
+O estado da instalação aparece no topo da janela para a pasta selecionada. **Desinstalar** pede confirmação, confere o registro e o SHA-256 do executável, então remove apenas `JetSheets.exe` e `jetsheets-install.json`. Projetos e outros arquivos da pasta são mantidos. Se o executável foi alterado ou está aberto, a remoção é recusada e o erro aparece na interface e no log. A desinstalação é oferecida pelo instalador; ainda não há entrada no painel de aplicativos do Windows.
+
 ## Publicação por GitHub Actions
 
 O workflow `.github/workflows/release.yml` roda em Windows quando uma tag `vMAJOR.MINOR.PATCH` é enviada. Ele verifica que a tag corresponde às versões de `jetsheets-ui` e `jetsheets-installer`, executa format/check/test/clippy, compila primeiro o aplicativo e depois o inclui no instalador, confere o subsistema gráfico de ambos e publica `JetSheets-windows-x86_64.exe`, `JetSheets-Installer-windows-x86_64.exe` e `JetSheets-Setup.exe`. Os dois últimos são cópias do mesmo instalador Rust. O instalador lê as Releases; artefatos temporários de runs do Actions não são usados como feed de atualização.
 
-Para publicar a versão `v0.1.2` após revisar e enviar o código para o repositório:
+Para publicar a versão `v0.1.3` após revisar e enviar o código para o repositório:
 
 ```powershell
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 Para cada versão posterior, altere `version` nos dois `Cargo.toml`, atualize `Cargo.lock`, envie o código e crie uma nova tag correspondente. Não reutilize uma tag ou substitua um ativo publicado. A publicação exige que o repositório permita ao `GITHUB_TOKEN` criar Releases; o workflow pede somente `contents: write` no job de publicação.
@@ -27,7 +29,7 @@ Link direto após a próxima publicação: `https://github.com/Joaopedror21/jets
 
 ## Inicialização sem terminal
 
-O instalador usa uma janela egui sem moldura padrão, com borda azul neon, painel lateral de etapas e controles próprios para mover, minimizar, maximizar e fechar. A pasta pode ser digitada ou escolhida no seletor; a instalação local incluída no executável aparece como ação principal. O progresso de downloads, pausa, retomada, cancelamento, notas da Release e mensagens de erro permanecem disponíveis na interface.
+O instalador usa uma janela egui sem moldura e sem borda decorativa, com controles para mover, minimizar, maximizar e fechar. O topo mostra se o JetSheets está instalado na pasta selecionada. A pasta pode ser digitada ou escolhida no seletor; a instalação local incluída no executável aparece como ação principal. O progresso de downloads, pausa, retomada, cancelamento, notas da Release e mensagens de erro permanecem disponíveis na interface.
 
 Não há script Inno Setup (`.iss`) neste repositório nem dependência de `.bat` ou `.cmd` na instalação. `JetSheets-Setup.exe` é o próprio instalador Rust/egui. Ambos os executáveis usam o subsistema Windows GUI na build release; builds debug continuam com subsistema console para depuração. O usuário pode abrir o aplicativo pelo botão **Abrir JetSheets** ou marcar **Abrir JetSheets após instalar**. O instalador não chama um interpretador de comandos.
 

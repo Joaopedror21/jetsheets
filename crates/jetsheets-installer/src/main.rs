@@ -38,8 +38,8 @@ fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("JetSheets · Instalador")
-            .with_inner_size([940.0, 650.0])
-            .with_min_inner_size([800.0, 590.0])
+            .with_inner_size([820.0, 580.0])
+            .with_min_inner_size([720.0, 520.0])
             .with_decorations(false),
         ..Default::default()
     };
