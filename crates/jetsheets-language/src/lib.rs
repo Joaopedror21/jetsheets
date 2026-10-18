@@ -71,7 +71,15 @@ pub fn parse_command_with_override(
 fn is_aggregate_intent(word: &str) -> bool {
     matches!(
         word,
-        "agrupe" | "agrupar" | "conte" | "contar" | "some" | "somar"
+        "agrupe"
+            | "agrupar"
+            | "conte"
+            | "contar"
+            | "some"
+            | "somar"
+            | "media"
+            | "calcule"
+            | "calcular"
     )
 }
 
@@ -93,8 +101,28 @@ fn parse_aggregate(
         ));
     }
     let group_column = resolve_column(group_tokens, table, chosen_column)?;
-    let operation = if matches!(tokens[0].norm.as_str(), "some" | "somar") {
-        let value_tokens = &tokens[1..by];
+    let is_sum = matches!(tokens[0].norm.as_str(), "some" | "somar");
+    let is_average = matches!(tokens[0].norm.as_str(), "media")
+        || matches!(tokens[0].norm.as_str(), "calcule" | "calcular")
+            && tokens[1..by].iter().any(|token| token.norm == "media");
+    if matches!(tokens[0].norm.as_str(), "calcule" | "calcular") && !is_average {
+        return Err(ParseError::Unsupported(
+            "informe 'média' e a coluna numérica".into(),
+        ));
+    }
+    let operation = if is_sum || is_average {
+        let mut value_tokens = &tokens[1..by];
+        if is_average {
+            if let Some(position) = value_tokens.iter().position(|token| token.norm == "media") {
+                value_tokens = &value_tokens[position + 1..];
+            }
+            while value_tokens
+                .first()
+                .is_some_and(|token| matches!(token.norm.as_str(), "de" | "do" | "da"))
+            {
+                value_tokens = &value_tokens[1..];
+            }
+        }
         if value_tokens.is_empty() {
             return Err(ParseError::Unsupported(
                 "informe a coluna numérica antes de 'por'".into(),
@@ -107,7 +135,11 @@ fn parse_aggregate(
                 table.columns[value_column].name
             )));
         }
-        AggregateOperation::Sum { value_column }
+        if is_average {
+            AggregateOperation::Average { value_column }
+        } else {
+            AggregateOperation::Sum { value_column }
+        }
     } else {
         AggregateOperation::Count
     };
@@ -118,6 +150,10 @@ fn parse_aggregate(
         ),
         AggregateOperation::Sum { value_column } => format!(
             "Somar '{}' por '{}'.",
+            table.columns[value_column].name, table.columns[group_column].name
+        ),
+        AggregateOperation::Average { value_column } => format!(
+            "Calcular média de '{}' por '{}'.",
             table.columns[value_column].name, table.columns[group_column].name
         ),
     };
@@ -963,6 +999,16 @@ mod tests {
             AggregateOperation::Sum { value_column: 1 }
         );
         assert_eq!(sum.spec.group_column, 3);
+        let ParsedCommand::Aggregate(average) =
+            parse_command("Calcule a média de valor por categoria", &table).unwrap()
+        else {
+            panic!("esperada média");
+        };
+        assert_eq!(
+            average.spec.operation,
+            AggregateOperation::Average { value_column: 1 }
+        );
+        assert!(parse_command("Calcule valor por categoria", &table).is_err());
         assert!(parse_command("Some categoria por produto", &table).is_err());
         assert!(parse_command("Some valor por", &table).is_err());
     }

@@ -15,7 +15,8 @@ use jetsheets_core::{
 };
 use jetsheets_language::{ParseError, ParsedCommand, parse_command, parse_command_with_override};
 use jetsheets_storage::{
-    Project, export_aggregate_csv, export_csv_view, import_csv, load_project, save_project,
+    ImportedXlsx, Project, export_aggregate_csv, export_csv_view, export_xlsx_view, import_csv,
+    import_xlsx, list_xlsx_sheets, load_project, save_project,
 };
 
 use crate::{
@@ -33,6 +34,14 @@ enum TaskOutcome {
     Imported {
         ticket: (u64, u64),
         result: Result<Table, String>,
+    },
+    XlsxSheets {
+        ticket: (u64, u64),
+        result: Result<(PathBuf, Vec<String>), String>,
+    },
+    ImportedXlsx {
+        ticket: (u64, u64),
+        result: Result<ImportedXlsx, String>,
     },
     Opened {
         ticket: (u64, u64),
@@ -59,7 +68,14 @@ enum TaskOutcome {
 enum ReplaceAction {
     New,
     Import,
+    ImportXlsx,
     Open,
+}
+
+struct PendingXlsx {
+    path: PathBuf,
+    sheets: Vec<String>,
+    ticket: (u64, u64),
 }
 
 enum ClipboardAction {
@@ -115,6 +131,7 @@ pub struct JetSheetsApp {
     saved_revision: u64,
     document_id: u64,
     confirm_replace: Option<ReplaceAction>,
+    pending_xlsx: Option<PendingXlsx>,
     confirm_close: bool,
     close_after_save: bool,
     allow_close: bool,
@@ -174,6 +191,7 @@ impl JetSheetsApp {
             saved_revision: 0,
             document_id: 0,
             confirm_replace: None,
+            pending_xlsx: None,
             confirm_close: false,
             close_after_save: false,
             allow_close: false,
@@ -268,6 +286,7 @@ impl JetSheetsApp {
         self.chart_page = 0;
         self.chart_data = None;
         self.aggregate_data = None;
+        self.pending_xlsx = None;
         self.dashboard_data.clear();
         self.dashboard_pages.clear();
         self.active_view = MainView::Table;
@@ -313,6 +332,7 @@ impl JetSheetsApp {
         match action {
             ReplaceAction::New => self.new_table(),
             ReplaceAction::Import => self.import_csv(ctx),
+            ReplaceAction::ImportXlsx => self.choose_xlsx(ctx),
             ReplaceAction::Open => self.open_project(ctx),
         }
     }
@@ -337,6 +357,81 @@ impl JetSheetsApp {
         });
         self.worker = Some(receiver);
         self.status = "Importando CSV...".into();
+    }
+
+    fn choose_xlsx(&mut self, ctx: &egui::Context) {
+        if self.worker.is_some() {
+            self.status = "Aguarde a operação de arquivo em andamento.".into();
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Planilha Excel", &["xlsx"])
+            .pick_file()
+        else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        let ticket = (self.document_id, self.revision);
+        std::thread::spawn(move || {
+            let result = list_xlsx_sheets(&path)
+                .map(|sheets| (path, sheets))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(TaskOutcome::XlsxSheets { ticket, result });
+            repaint.request_repaint();
+        });
+        self.worker = Some(receiver);
+        self.status = "Lendo as abas do XLSX...".into();
+    }
+
+    fn import_selected_xlsx(&mut self, ctx: &egui::Context, sheet: String) {
+        let Some(pending) = self.pending_xlsx.take() else {
+            return;
+        };
+        if pending.ticket != (self.document_id, self.revision) {
+            self.status = "A tabela mudou; escolha o XLSX novamente.".into();
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        let ticket = pending.ticket;
+        self.status = format!("Importando aba '{sheet}' do XLSX...");
+        std::thread::spawn(move || {
+            let result = import_xlsx(&pending.path, &sheet).map_err(|error| error.to_string());
+            let _ = sender.send(TaskOutcome::ImportedXlsx { ticket, result });
+            repaint.request_repaint();
+        });
+        self.worker = Some(receiver);
+    }
+
+    fn xlsx_sheet_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.pending_xlsx else {
+            return;
+        };
+        let mut selected = None;
+        let mut cancel = false;
+        egui::Window::new("Escolher aba do XLSX")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(390.0)
+            .show(ctx, |ui| {
+                ui.label("Escolha a aba que será importada como tabela.");
+                ui.label("Outras abas, fórmulas e formatação não serão preservadas.");
+                for sheet in &pending.sheets {
+                    if ui.button(sheet).clicked() {
+                        selected = Some(sheet.clone());
+                    }
+                }
+                if ui.button("Cancelar").clicked() {
+                    cancel = true;
+                }
+            });
+        if cancel {
+            self.pending_xlsx = None;
+            self.status = "Importação XLSX cancelada.".into();
+        } else if let Some(sheet) = selected {
+            self.import_selected_xlsx(ctx, sheet);
+        }
     }
 
     fn open_project(&mut self, ctx: &egui::Context) {
@@ -437,6 +532,40 @@ impl JetSheetsApp {
         self.status = "Exportando resultados CSV...".into();
     }
 
+    fn export_results_xlsx(&mut self, ctx: &egui::Context) {
+        if self.worker.is_some() {
+            self.status = "Aguarde a operação de arquivo em andamento.".into();
+            return;
+        }
+        if self.pending_cell_refresh {
+            self.refresh();
+        }
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("Planilha Excel", &["xlsx"])
+            .set_file_name("resultados.xlsx")
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("xlsx");
+        }
+        let table = self.project.table.clone();
+        let visible_rows = self.visible_rows.clone();
+        let rows = visible_rows.len();
+        let task_path = path.clone();
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = export_xlsx_view(&task_path, &table, &visible_rows)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(TaskOutcome::Exported { path, rows, result });
+            repaint.request_repaint();
+        });
+        self.worker = Some(receiver);
+        self.status = "Exportando resultados XLSX...".into();
+    }
+
     fn export_groups(&mut self, ctx: &egui::Context) {
         if self.worker.is_some() {
             self.status = "Aguarde a operação de arquivo em andamento.".into();
@@ -510,6 +639,48 @@ impl JetSheetsApp {
             } if ticket == (self.document_id, self.revision) => {
                 self.status = format!("Falha ao importar: {error}")
             }
+            TaskOutcome::XlsxSheets {
+                ticket,
+                result: Ok((path, sheets)),
+            } if ticket == (self.document_id, self.revision) => {
+                self.pending_xlsx = Some(PendingXlsx {
+                    path,
+                    sheets,
+                    ticket,
+                });
+                self.status = "Escolha a aba do XLSX para importar.".into();
+            }
+            TaskOutcome::XlsxSheets {
+                ticket,
+                result: Err(error),
+            } if ticket == (self.document_id, self.revision) => {
+                self.status = format!("Falha ao ler XLSX: {error}");
+            }
+            TaskOutcome::ImportedXlsx {
+                ticket,
+                result: Ok(imported),
+            } if ticket == (self.document_id, self.revision) => {
+                let count = imported.table.row_count();
+                self.replace_project(
+                    Project {
+                        table: imported.table,
+                        filter: None,
+                        sort: None,
+                        aggregate: None,
+                        chart: None,
+                        dashboard: DashboardSpec::default(),
+                    },
+                    None,
+                );
+                self.changed();
+                self.status = format!("XLSX importado: {count} linhas. {}", imported.warning);
+            }
+            TaskOutcome::ImportedXlsx {
+                ticket,
+                result: Err(error),
+            } if ticket == (self.document_id, self.revision) => {
+                self.status = format!("Falha ao importar XLSX: {error}");
+            }
             TaskOutcome::Opened {
                 ticket,
                 result: Ok((path, project)),
@@ -523,7 +694,10 @@ impl JetSheetsApp {
             } if ticket == (self.document_id, self.revision) => {
                 self.status = format!("Falha ao abrir: {error}")
             }
-            TaskOutcome::Imported { .. } | TaskOutcome::Opened { .. } => {
+            TaskOutcome::Imported { .. }
+            | TaskOutcome::XlsxSheets { .. }
+            | TaskOutcome::ImportedXlsx { .. }
+            | TaskOutcome::Opened { .. } => {
                 self.status =
                     "A importação/abertura foi descartada porque a tabela mudou durante a leitura."
                         .into();
@@ -752,6 +926,10 @@ impl JetSheetsApp {
                             self.request_replace(ReplaceAction::Import, &ctx);
                             ui.close();
                         }
+                        if ui.button("Importar XLSX...").clicked() {
+                            self.request_replace(ReplaceAction::ImportXlsx, &ctx);
+                            ui.close();
+                        }
                         if ui.button("Abrir projeto...").clicked() {
                             self.request_replace(ReplaceAction::Open, &ctx);
                             ui.close();
@@ -779,6 +957,9 @@ impl JetSheetsApp {
                     }
                     if theme::primary_button(ui, "Importar CSV", colors).clicked() {
                         self.request_replace(ReplaceAction::Import, &ctx);
+                    }
+                    if ui.button("Importar XLSX").clicked() {
+                        self.request_replace(ReplaceAction::ImportXlsx, &ctx);
                     }
                     if ui.button("Salvar").clicked() {
                         self.save_project(&ctx, false);
@@ -838,7 +1019,9 @@ impl JetSheetsApp {
             .show(root, |ui| {
                 ui.add_space(10.0);
                 ui.heading("Comandos em português");
-                ui.label("Descreva um filtro, ordenação ou agrupamento usando os nomes das colunas.");
+                ui.label(
+                    "Descreva um filtro, ordenação ou agrupamento usando os nomes das colunas.",
+                );
                 ui.add_space(8.0);
                 let input = ui.add(
                     TextEdit::multiline(&mut self.command)
@@ -855,7 +1038,11 @@ impl JetSheetsApp {
                 ui.separator();
 
                 if let Some(preview) = &self.preview {
-                    ui.label(RichText::new("Prévia da operação").strong().color(colors.accent_text));
+                    ui.label(
+                        RichText::new("Prévia da operação")
+                            .strong()
+                            .color(colors.accent_text),
+                    );
                     ui.label(preview.explanation());
                     let action = match preview {
                         ParsedCommand::Filter(_) => "Aplicar filtro",
@@ -876,17 +1063,27 @@ impl JetSheetsApp {
                     if let ParseError::Ambiguous { candidates, .. } = error {
                         for candidate in candidates {
                             if ui.button(format!("Usar coluna: {candidate}")).clicked() {
-                                chosen_column = self.project.table.columns.iter().position(|column| &column.name == candidate);
+                                chosen_column = self
+                                    .project
+                                    .table
+                                    .columns
+                                    .iter()
+                                    .position(|column| &column.name == candidate);
                             }
                         }
                     }
                 }
                 if let Some(column) = chosen_column {
-                    match parse_command_with_override(&self.command, &self.project.table, Some(column)) {
+                    match parse_command_with_override(
+                        &self.command,
+                        &self.project.table,
+                        Some(column),
+                    ) {
                         Ok(parsed) => {
                             self.preview = Some(parsed);
                             self.parse_error = None;
-                            self.status = "Escolha aplicada. Confira a prévia antes de confirmar.".into();
+                            self.status =
+                                "Escolha aplicada. Confira a prévia antes de confirmar.".into();
                         }
                         Err(error) => {
                             self.status = error.to_string();
@@ -902,7 +1099,8 @@ impl JetSheetsApp {
                     ui.label("• ordene por valor decrescente");
                     ui.label("• agrupe por categoria");
                     ui.label("• some valor por categoria");
-                    ui.label("Filtros usam E/OU. Médias por grupo e comandos de gráfico ainda não estão disponíveis.");
+                    ui.label("• calcule média de valor por categoria");
+                    ui.label("Filtros usam E/OU. Comandos de gráfico ainda não estão disponíveis.");
                 });
                 ui.collapsing("Comandos aplicados nesta sessão", |ui| {
                     for command in self.command_history.iter().rev() {
@@ -911,7 +1109,10 @@ impl JetSheetsApp {
                 });
                 ui.separator();
                 ui.label(RichText::new("Registro selecionado").strong());
-                if let Some(row) = self.selected_row.and_then(|index| self.project.table.rows.get(index).map(|row| (index, row))) {
+                if let Some(row) = self
+                    .selected_row
+                    .and_then(|index| self.project.table.rows.get(index).map(|row| (index, row)))
+                {
                     ui.label(format!("Linha {}", row.0 + 1));
                     for (column, value) in self.project.table.columns.iter().zip(row.1) {
                         ui.horizontal(|ui| {
@@ -1339,6 +1540,9 @@ impl JetSheetsApp {
             if ui.button("Exportar CSV").clicked() {
                 self.export_results(&ctx);
             }
+            if ui.button("Exportar XLSX").clicked() {
+                self.export_results_xlsx(&ctx);
+            }
         });
         let mut selected_sort = self.project.sort;
         let sort_label = selected_sort
@@ -1451,7 +1655,9 @@ impl JetSheetsApp {
                             groups.len(),
                             self.visible_rows.len()
                         ));
-                        let is_sum = matches!(spec.operation, AggregateOperation::Sum { .. });
+                        let numeric = !matches!(spec.operation, AggregateOperation::Count);
+                        let is_average =
+                            matches!(spec.operation, AggregateOperation::Average { .. });
                         ui.horizontal(|ui| {
                             ui.add_sized(
                                 [190.0, 23.0],
@@ -1461,12 +1667,12 @@ impl JetSheetsApp {
                                 [85.0, 23.0],
                                 egui::Label::new(RichText::new("Registros").strong()),
                             );
-                            if is_sum {
+                            if numeric {
                                 ui.add_sized(
                                     [110.0, 23.0],
                                     egui::Label::new(RichText::new("Válidos").strong()),
                                 );
-                                ui.strong("Soma");
+                                ui.strong(if is_average { "Média" } else { "Soma" });
                             }
                         });
                         ScrollArea::vertical()
@@ -1482,12 +1688,19 @@ impl JetSheetsApp {
                                             [85.0, 23.0],
                                             egui::Label::new(group.count.to_string()),
                                         );
-                                        if is_sum {
+                                        if numeric {
                                             ui.add_sized(
                                                 [110.0, 23.0],
                                                 egui::Label::new(group.valid_values.to_string()),
                                             );
-                                            ui.label(format_number(group.total));
+                                            ui.label(if is_average {
+                                                group
+                                                    .average()
+                                                    .map(format_number)
+                                                    .unwrap_or_else(|| "—".into())
+                                            } else {
+                                                format_number(group.total)
+                                            });
                                         }
                                     });
                                 }
@@ -1770,18 +1983,23 @@ impl JetSheetsApp {
                 );
                 match groups {
                     Ok(groups) => {
-                        let is_sum = self.project.aggregate.is_some_and(|spec| {
-                            matches!(spec.operation, AggregateOperation::Sum { .. })
-                        });
+                        let operation = self.project.aggregate.map(|spec| spec.operation);
                         for group in groups.iter().take(10) {
-                            let value = if is_sum {
-                                format!(
+                            let value = match operation {
+                                Some(AggregateOperation::Sum { .. }) => format!(
                                     "{} registros · soma {}",
                                     group.count,
                                     format_number(group.total)
-                                )
-                            } else {
-                                format!("{} registros", group.count)
+                                ),
+                                Some(AggregateOperation::Average { .. }) => format!(
+                                    "{} registros · média {}",
+                                    group.count,
+                                    group
+                                        .average()
+                                        .map(format_number)
+                                        .unwrap_or_else(|| "—".into())
+                                ),
+                                _ => format!("{} registros", group.count),
                             };
                             ui.horizontal(|ui| {
                                 ui.add_sized([180.0, 24.0], egui::Label::new(&group.label));
@@ -1995,6 +2213,7 @@ impl eframe::App for JetSheetsApp {
             }
         });
         self.confirmation_dialog(root.ctx());
+        self.xlsx_sheet_dialog(root.ctx());
         self.close_dialog(root.ctx());
         self.settings_dialog(root.ctx());
     }
@@ -2052,6 +2271,32 @@ fn describe_filter(expr: &FilterExpr, table: &Table) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xlsx_worker_replaces_table_and_reports_conversion_limit() {
+        let ctx = egui::Context::default();
+        let mut app = JetSheetsApp::new(&ctx);
+        let mut table = Table::new("Vendas", vec!["Produto".into(), "Valor".into()]);
+        table.add_row(vec!["Papel".into(), "15,75".into()]).unwrap();
+        table.infer_column_types();
+        let ticket = (app.document_id, app.revision);
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TaskOutcome::ImportedXlsx {
+                ticket,
+                result: Ok(ImportedXlsx {
+                    table,
+                    warning: "Fórmulas não preservadas.".into(),
+                }),
+            })
+            .unwrap();
+        app.worker = Some(receiver);
+        app.poll_worker(&ctx);
+        assert_eq!(app.project.table.name, "Vendas");
+        assert_eq!(app.visible_rows, vec![0]);
+        assert!(app.status.contains("Fórmulas não preservadas"));
+        assert!(app.revision != app.saved_revision);
+    }
 
     #[test]
     fn grouping_updates_when_filter_changes_and_can_be_undone() {

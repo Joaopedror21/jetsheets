@@ -12,6 +12,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod xlsx;
+pub use xlsx::{ImportedXlsx, export_xlsx_view, import_xlsx, list_xlsx_sheets};
+
 const PROJECT_FORMAT: &str = "JetSheets";
 const PROJECT_VERSION: u32 = 1;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -48,6 +51,7 @@ pub enum StorageError {
     Io(io::Error),
     Json(serde_json::Error),
     Csv(String),
+    Xlsx(String),
     Project(String),
 }
 
@@ -56,7 +60,7 @@ impl fmt::Display for StorageError {
         match self {
             Self::Io(error) => write!(f, "Erro de arquivo: {error}"),
             Self::Json(error) => write!(f, "Arquivo de projeto inválido: {error}"),
-            Self::Csv(message) | Self::Project(message) => message.fmt(f),
+            Self::Csv(message) | Self::Xlsx(message) | Self::Project(message) => message.fmt(f),
         }
     }
 }
@@ -66,7 +70,7 @@ impl std::error::Error for StorageError {
         match self {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
-            Self::Csv(_) | Self::Project(_) => None,
+            Self::Csv(_) | Self::Xlsx(_) | Self::Project(_) => None,
         }
     }
 }
@@ -177,15 +181,31 @@ pub fn export_aggregate_csv(
     let write_result = (|| -> Result<(), StorageError> {
         temp.write_all(b"\xef\xbb\xbf")?;
         let mut header = vec![table.columns[spec.group_column].name.as_str(), "Registros"];
-        if matches!(spec.operation, AggregateOperation::Sum { .. }) {
-            header.extend(["Valores válidos", "Soma"]);
+        if !matches!(spec.operation, AggregateOperation::Count) {
+            header.extend([
+                "Valores válidos",
+                if matches!(spec.operation, AggregateOperation::Average { .. }) {
+                    "Média"
+                } else {
+                    "Soma"
+                },
+            ]);
         }
         write_csv_record(&mut temp, header)?;
         for group in &groups {
             let mut values = vec![group.label.clone(), group.count.to_string()];
-            if matches!(spec.operation, AggregateOperation::Sum { .. }) {
+            if !matches!(spec.operation, AggregateOperation::Count) {
                 values.push(group.valid_values.to_string());
-                values.push(group.total.to_string().replace('.', ","));
+                let result = if matches!(spec.operation, AggregateOperation::Average { .. }) {
+                    group.average()
+                } else {
+                    Some(group.total)
+                };
+                values.push(
+                    result
+                        .map(|value| value.to_string().replace('.', ","))
+                        .unwrap_or_default(),
+                );
             }
             write_csv_record(&mut temp, values.iter().map(String::as_str))?;
         }
@@ -564,6 +584,28 @@ mod tests {
         let exported = import_csv(&path).unwrap();
         fs::remove_file(path).unwrap();
         assert_eq!(exported.rows, vec![vec!["A", "2", "2", "1002,5"]]);
+    }
+
+    #[test]
+    fn exports_grouped_average_and_marks_groups_without_values() {
+        let path = test_path("csv");
+        let mut table = Table::new("Vendas", vec!["Categoria".into(), "Valor".into()]);
+        for row in [["A", "10"], ["A", "20"], ["B", ""], ["A", ""]] {
+            table.add_row(row.map(str::to_owned).to_vec()).unwrap();
+        }
+        table.infer_column_types();
+        let spec = AggregateSpec {
+            group_column: 0,
+            operation: AggregateOperation::Average { value_column: 1 },
+        };
+        export_aggregate_csv(&path, &table, &[0, 1, 2, 3], &spec).unwrap();
+        let exported = import_csv(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        assert_eq!(exported.columns[3].name, "Média");
+        assert_eq!(
+            exported.rows,
+            vec![vec!["A", "3", "2", "15"], vec!["B", "1", "0", ""]]
+        );
     }
 
     #[test]

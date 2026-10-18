@@ -258,6 +258,7 @@ pub struct AggregateSpec {
 pub enum AggregateOperation {
     Count,
     Sum { value_column: usize },
+    Average { value_column: usize },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -266,6 +267,12 @@ pub struct GroupResult {
     pub count: usize,
     pub valid_values: usize,
     pub total: f64,
+}
+
+impl GroupResult {
+    pub fn average(&self) -> Option<f64> {
+        (self.valid_values > 0).then(|| self.total / self.valid_values as f64)
+    }
 }
 
 /// Groups visible rows in their first-seen order. Blank numeric cells do not
@@ -278,7 +285,9 @@ pub fn aggregate_rows(
     if spec.group_column >= table.column_count() {
         return Err("A coluna de agrupamento não existe.".into());
     }
-    if let AggregateOperation::Sum { value_column } = spec.operation {
+    if let AggregateOperation::Sum { value_column } | AggregateOperation::Average { value_column } =
+        spec.operation
+    {
         let column = table
             .columns
             .get(value_column)
@@ -321,7 +330,9 @@ pub fn aggregate_rows(
         });
         let group = &mut groups[index];
         group.count += 1;
-        if let AggregateOperation::Sum { value_column } = spec.operation {
+        if let AggregateOperation::Sum { value_column }
+        | AggregateOperation::Average { value_column } = spec.operation
+        {
             let value = row
                 .get(value_column)
                 .ok_or_else(|| format!("Linha {row_index} incompleta no agrupamento."))?
@@ -964,6 +975,17 @@ mod tests {
         assert_eq!(groups[0].count, 3);
         assert_eq!(groups[0].valid_values, 2);
         assert_eq!(groups[0].total, 1002.5);
+        assert_eq!(groups[0].average(), Some(501.25));
+        let average = AggregateSpec {
+            group_column: 0,
+            operation: AggregateOperation::Average { value_column: 1 },
+        };
+        let averaged = aggregate_rows(&table, &[0, 2, 3], &average).unwrap();
+        assert_eq!(averaged[0].average(), Some(501.25));
+        assert_eq!(
+            aggregate_rows(&table, &[2], &average).unwrap()[0].average(),
+            None
+        );
         assert_eq!(table.rows[0][1], "1.000,50");
         let count = AggregateSpec {
             group_column: 0,
